@@ -5,11 +5,13 @@ import {
   DEPTH_MEASUREMENT_METHODS,
   DOCUMENT_KINDS,
   GNSS_FIX_QUALITIES,
+  JUNCTION_KINDS,
   OPERATIONAL_STATUSES,
   PHOTO_KINDS,
   PHYSICAL_CONDITIONS,
   POSITION_SOURCES,
   VERIFICATION_STATUSES,
+  VERTEX_KINDS,
   type AssetTypeDefinition,
   type CustomAttributeValue,
 } from '@/types/domain';
@@ -288,3 +290,212 @@ export const uploadAssetDocumentMetaSchema = z.object({
     .max(160, 'Document title must be 160 characters or fewer.'),
   description: z.string().trim().max(500).optional(),
 });
+
+// -----------------------------------------------------------------------------
+// Phase 3 — Linear Infrastructure Routes, Vertices, Depth Observations & Junctions
+// -----------------------------------------------------------------------------
+
+const wgs84PositionSchema = z.tuple([
+  z.number().min(-180, 'Longitude must be between -180° and 180°.').max(180),
+  z.number().min(-90, 'Latitude must be between -90° and 90°.').max(90),
+]);
+
+export const linearGeometrySchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('LineString'),
+    coordinates: z
+      .array(wgs84PositionSchema)
+      .min(2, 'A linear utility route must contain at least 2 vertices.')
+      .max(5000, 'A linear utility route may not exceed 5,000 vertices.'),
+  }),
+  z.object({
+    type: z.literal('MultiLineString'),
+    coordinates: z
+      .array(
+        z
+          .array(wgs84PositionSchema)
+          .min(2, 'Each route segment must contain at least 2 vertices.'),
+      )
+      .min(1, 'MultiLineString must include at least one segment.')
+      .max(200),
+  }),
+]);
+
+export const routeVertexInputSchema = z.object({
+  partIndex: z.number().int().min(0).default(0),
+  sequenceIndex: z.number().int().min(0),
+  vertexKind: z.enum(VERTEX_KINDS).default('track_point'),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  chainageM: z.number().min(0).nullable().optional(),
+  horizontalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
+  verticalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
+  fixQuality: z.enum(GNSS_FIX_QUALITIES).default('unknown'),
+  notes: z.string().trim().max(1000).nullable().optional(),
+  recordedAt: z.string().trim().optional(),
+});
+
+export type RouteVertexInput = z.input<typeof routeVertexInputSchema>;
+
+export const depthObservationInputSchema = z.object({
+  latitude: z.number().min(-90, 'Latitude out of range.').max(90),
+  longitude: z.number().min(-180, 'Longitude out of range.').max(180),
+  depthM: z
+    .number({ error: 'Burial depth (m) is required.' })
+    .min(0, 'Burial depth cannot be negative.')
+    .max(100, 'Burial depth must be 100 m or less.'),
+  measurementMethod: z.enum(DEPTH_MEASUREMENT_METHODS, {
+    error:
+      'Select how burial depth was measured (never infer depth from GPS altitude).',
+  }),
+  documentedBeforeCovering: z.boolean().default(false),
+  chainageM: z.number().min(0).nullable().optional(),
+  horizontalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
+  notes: z.string().trim().max(1000).nullable().optional(),
+  observedAt: z.string().trim().optional(),
+});
+
+export type DepthObservationInput = z.input<typeof depthObservationInputSchema>;
+
+export const addDepthObservationInputSchema = depthObservationInputSchema.extend(
+  {
+    assetId: z.uuid(),
+    saveOffline: z.boolean().optional(),
+  },
+);
+
+export type AddDepthObservationInput = z.input<
+  typeof addDepthObservationInputSchema
+>;
+
+export const utilityJunctionInputSchema = z.object({
+  connectedAssetId: z.uuid().nullable().optional(),
+  junctionKind: z.enum(JUNCTION_KINDS).default('tee'),
+  label: z.string().trim().max(140).nullable().optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  depthM: z.number().min(0).max(100).nullable().optional(),
+  depthMeasurementMethod: z.enum(DEPTH_MEASUREMENT_METHODS).nullable().optional(),
+  notes: z.string().trim().max(1000).nullable().optional(),
+  recordedAt: z.string().trim().optional(),
+}).superRefine((val, ctx) => {
+  if (
+    val.depthM !== null &&
+    val.depthM !== undefined &&
+    !val.depthMeasurementMethod
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['depthMeasurementMethod'],
+      message: 'Specify depth measurement method for junction depth.',
+    });
+  }
+});
+
+export type UtilityJunctionInput = z.input<typeof utilityJunctionInputSchema>;
+
+export const createLinearRouteInputSchema = z
+  .object({
+    id: z.uuid().optional(),
+    campusId: z.uuid('Please select a campus.'),
+    departmentId: z.uuid().nullable().optional(),
+    assetTypeId: z.string().trim().min(1, 'Please select a linear utility type.'),
+    assetCode: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(
+        /^[A-Z0-9][A-Z0-9_-]{1,39}$/,
+        'Route ID must be 2–40 uppercase letters, digits, hyphens, or underscores (e.g. WP-MAIN-001).',
+      ),
+    name: z
+      .string()
+      .trim()
+      .min(2, 'Route name must be at least 2 characters.')
+      .max(160, 'Route name must be 160 characters or fewer.'),
+    description: z.string().trim().max(2000).nullable().optional(),
+    geometry: linearGeometrySchema,
+
+    installationDate: z.string().trim().nullable().optional(),
+    operationalStatus: z.enum(OPERATIONAL_STATUSES).default('operational'),
+    physicalCondition: z.enum(PHYSICAL_CONDITIONS).default('good'),
+    submissionMode: z.enum(['draft', 'submitted']).default('submitted'),
+    isCriticalHazard: z.boolean().default(false),
+
+    material: z.string().trim().max(100).nullable().optional(),
+    diameterMm: z.number().positive().max(10000).nullable().optional(),
+    cableSpecification: z.string().trim().max(160).nullable().optional(),
+    recordedDepthM: z.number().min(0).max(100).nullable().optional(),
+    depthIsVariable: z.boolean().default(true),
+    depthMeasurementMethod: z.enum(DEPTH_MEASUREMENT_METHODS).nullable().optional(),
+    documentedBeforeCovering: z.boolean().default(false),
+    directionDescription: z.string().trim().max(240).nullable().optional(),
+    constructionRecordRef: z.string().trim().max(160).nullable().optional(),
+
+    customAttributes: z
+      .record(
+        z.string(),
+        z.union([z.string(), z.number(), z.boolean(), z.null()]),
+      )
+      .default({}),
+
+    referenceBenchmarkId: z.uuid().nullable().optional(),
+    locationReferenceText: z.string().trim().max(300).nullable().optional(),
+    notes: z.string().trim().max(2000).nullable().optional(),
+
+    positionSource: z.enum(POSITION_SOURCES).default('smartphone_gps'),
+    captureMethod: z
+      .enum(['gps_walk_route', 'manual_draw', 'geojson_import'])
+      .default('manual_draw'),
+    receiverModel: z.string().trim().max(120).nullable().optional(),
+    horizontalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
+    verticalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
+    fixQuality: z.enum(GNSS_FIX_QUALITIES).default('unknown'),
+    correctionSource: z.string().trim().max(120).nullable().optional(),
+    sourceCrs: z.string().trim().min(4).max(40).default('EPSG:4326'),
+    measuredAt: z.string().trim().optional(),
+    isManuallyAdjusted: z.boolean().default(false),
+    capturedAt: z.string().trim().optional(),
+
+    vertices: z.array(routeVertexInputSchema).default([]),
+    depthObservations: z.array(depthObservationInputSchema).default([]),
+    junctions: z.array(utilityJunctionInputSchema).default([]),
+
+    saveOffline: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (
+      val.recordedDepthM !== null &&
+      val.recordedDepthM !== undefined &&
+      !val.depthMeasurementMethod
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['depthMeasurementMethod'],
+        message:
+          'Specify how nominal burial depth was measured (never infer from GPS elevation).',
+      });
+    }
+  });
+
+export type CreateLinearRouteInput = z.input<typeof createLinearRouteInputSchema>;
+
+export const updateRouteGeometryInputSchema = z.object({
+  assetId: z.uuid(),
+  geometry: linearGeometrySchema,
+  vertices: z.array(routeVertexInputSchema).default([]),
+  junctions: z.array(utilityJunctionInputSchema).optional(),
+  captureMethod: z
+    .enum(['gps_walk_route', 'manual_draw', 'geojson_import'])
+    .optional(),
+  positionSource: z.enum(POSITION_SOURCES).optional(),
+  horizontalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
+  isManuallyAdjusted: z.boolean().default(true),
+  editNotes: z.string().trim().max(500).optional(),
+  saveOffline: z.boolean().optional(),
+});
+
+export type UpdateRouteGeometryInput = z.input<
+  typeof updateRouteGeometryInputSchema
+>;
+

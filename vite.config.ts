@@ -40,6 +40,10 @@ export default defineConfig({
               name: 'offline-forms-vendor',
               test: /node_modules[\\/](dexie|dexie-react-hooks|zod|react-hook-form|@hookform)[\\/]/,
             },
+            {
+              name: 'map-vendor',
+              test: /node_modules[\\/](leaflet|react-leaflet|@react-leaflet|@turf)[\\/]/,
+            },
           ],
         },
       },

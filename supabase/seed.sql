@@ -219,4 +219,76 @@ values (
 )
 on conflict (asset_id) do nothing;
 
+-- Phase 3: Simulated route vertices, variable burial depth observations & junction
+insert into public.utility_route_vertices (
+  id, institution_id, asset_id, part_index, sequence_index, vertex_kind,
+  geom, chainage_m, horizontal_accuracy_m, fix_quality, notes
+)
+values
+  (
+    '81000000-0000-4000-8000-000000000001',
+    '11111111-1111-4111-8111-111111111101',
+    '77777777-7777-4777-8777-777777777704',
+    0, 0, 'start_point',
+    ST_SetSRID(ST_MakePoint(5.1389, 7.3045), 4326),
+    0, 4.1, 'autonomous', 'Simulated wellhead outlet flange'
+  ),
+  (
+    '81000000-0000-4000-8000-000000000002',
+    '11111111-1111-4111-8111-111111111101',
+    '77777777-7777-4777-8777-777777777704',
+    0, 1, 'bend',
+    ST_SetSRID(ST_MakePoint(5.1394, 7.3042), 4326),
+    64.5, 4.5, 'autonomous', 'Simulated 30-degree elbow beneath road culvert'
+  ),
+  (
+    '81000000-0000-4000-8000-000000000003',
+    '11111111-1111-4111-8111-111111111101',
+    '77777777-7777-4777-8777-777777777704',
+    0, 2, 'end_point',
+    ST_SetSRID(ST_MakePoint(5.1402, 7.3040), 4326),
+    155.6, 4.8, 'autonomous', 'Simulated riser inlet at elevated steel tank'
+  )
+on conflict (id) do nothing;
+
+insert into public.utility_depth_observations (
+  id, institution_id, asset_id, geom, depth_m, measurement_method,
+  documented_before_covering, chainage_m, horizontal_accuracy_m, notes
+)
+values
+  (
+    '82000000-0000-4000-8000-000000000001',
+    '11111111-1111-4111-8111-111111111101',
+    '77777777-7777-4777-8777-777777777704',
+    ST_SetSRID(ST_MakePoint(5.1389, 7.3045), 4326),
+    1.100, 'open_trench_tape', true, 0, 4.1,
+    'Simulated depth measured from ground level to pipe crown at borehole exit'
+  ),
+  (
+    '82000000-0000-4000-8000-000000000002',
+    '11111111-1111-4111-8111-111111111101',
+    '77777777-7777-4777-8777-777777777704',
+    ST_SetSRID(ST_MakePoint(5.1394, 7.3042), 4326),
+    1.550, 'open_trench_tape', true, 64.5, 4.5,
+    'Simulated deeper road-crossing cover encased in 160mm steel sleeve'
+  )
+on conflict (id) do nothing;
+
+insert into public.utility_junctions (
+  id, institution_id, asset_id, junction_kind, label, geom,
+  depth_m, depth_measurement_method, notes
+)
+values (
+  '83000000-0000-4000-8000-000000000001',
+  '11111111-1111-4111-8111-111111111101',
+  '77777777-7777-4777-8777-777777777704',
+  'tee',
+  'Hostel Block B 63mm Service Tee (Simulated)',
+  ST_SetSRID(ST_MakePoint(5.1394, 7.3042), 4326),
+  1.500,
+  'open_trench_tape',
+  'Simulated isolation gate valve installed inside concrete box'
+)
+on conflict (id) do nothing;
+
 commit;

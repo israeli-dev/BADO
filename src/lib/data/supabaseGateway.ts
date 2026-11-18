@@ -2,13 +2,19 @@ import type { Geometry } from 'geojson';
 import { z } from 'zod';
 import { isPendingVerification } from '@/lib/assets/labels';
 import {
+  addDepthObservationInputSchema,
   createAssetInputSchema,
+  createLinearRouteInputSchema,
   reviewVerificationSchema,
+  updateRouteGeometryInputSchema,
   uploadAssetDocumentMetaSchema,
   uploadAssetPhotoMetaSchema,
   validateDynamicAttributes,
+  type AddDepthObservationInput,
   type CreateAssetInput,
+  type CreateLinearRouteInput,
   type ReviewVerificationInput,
+  type UpdateRouteGeometryInput,
 } from '@/lib/assets/validation';
 import {
   DEFAULT_LEGEND_CONFIG,
@@ -29,6 +35,17 @@ import {
   type UploadAssetPhotoInput,
 } from '@/lib/data/gateway';
 import { badoDb } from '@/lib/db/badoDb';
+import {
+  buildInstitutionalGeoJsonExport,
+  type BadoGeoJsonFeatureCollection,
+} from '@/lib/gis/geojsonIo';
+import {
+  computeGeometryLengthM,
+  computeVertexChainagesM,
+  geometryToEwkt,
+  isLinearGeometry,
+  snapPointToLinearRoute,
+} from '@/lib/gis/geometry';
 import {
   preparePhotoForStorage,
   validateDocumentFile,
@@ -60,6 +77,9 @@ import type {
   SurveyBenchmarkRecord,
   UserInstitutionMembership,
   UserProfile,
+  UtilityDepthObservationRecord,
+  UtilityJunctionRecord,
+  UtilityRouteVertexRecord,
 } from '@/types/domain';
 
 type InstitutionRow = Database['public']['Tables']['institutions']['Row'];
@@ -77,6 +97,11 @@ type DocumentRow = Database['public']['Tables']['asset_documents']['Row'];
 type ObservationRow = Database['public']['Tables']['asset_observations']['Row'];
 type HistoryRow =
   Database['public']['Tables']['asset_verification_history']['Row'];
+type RouteVertexRow =
+  Database['public']['Tables']['utility_route_vertices']['Row'];
+type DepthObsRow =
+  Database['public']['Tables']['utility_depth_observations']['Row'];
+type JunctionRow = Database['public']['Tables']['utility_junctions']['Row'];
 
 function parseGeometry(raw: unknown): Geometry {
   if (raw && typeof raw === 'object' && 'type' in raw && 'coordinates' in raw) {
@@ -243,6 +268,10 @@ function mapAsset(row: AssetRow): AssetRecord {
     geometry: parseGeometry(row.geom),
     installationDate: row.installation_date,
     operationalStatus: row.operational_status,
+    routeLengthM:
+      row.route_length_m !== null && row.route_length_m !== undefined
+        ? Number(row.route_length_m)
+        : computeGeometryLengthM(parseGeometry(row.geom)),
     physicalCondition: row.physical_condition,
     verificationStatus: row.verification_status,
     dataQuality: row.data_quality,
@@ -286,6 +315,69 @@ function mapAsset(row: AssetRow): AssetRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     localSyncStatus: 'synced',
+  };
+}
+
+function mapRouteVertex(row: RouteVertexRow): UtilityRouteVertexRecord {
+  return {
+    id: row.id,
+    institutionId: row.institution_id,
+    assetId: row.asset_id,
+    partIndex: row.part_index,
+    sequenceIndex: row.sequence_index,
+    vertexKind: row.vertex_kind,
+    location: parsePointGeometry(row.geom) ?? { lat: 0, lng: 0 },
+    chainageM: row.chainage_m !== null ? Number(row.chainage_m) : null,
+    horizontalAccuracyM:
+      row.horizontal_accuracy_m !== null
+        ? Number(row.horizontal_accuracy_m)
+        : null,
+    verticalAccuracyM:
+      row.vertical_accuracy_m !== null ? Number(row.vertical_accuracy_m) : null,
+    fixQuality: row.fix_quality,
+    notes: row.notes,
+    recordedAt: row.recorded_at,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  };
+}
+
+function mapDepthObservation(row: DepthObsRow): UtilityDepthObservationRecord {
+  return {
+    id: row.id,
+    institutionId: row.institution_id,
+    assetId: row.asset_id,
+    location: parsePointGeometry(row.geom) ?? { lat: 0, lng: 0 },
+    depthM: Number(row.depth_m),
+    measurementMethod: row.measurement_method,
+    documentedBeforeCovering: row.documented_before_covering,
+    chainageM: row.chainage_m !== null ? Number(row.chainage_m) : null,
+    horizontalAccuracyM:
+      row.horizontal_accuracy_m !== null
+        ? Number(row.horizontal_accuracy_m)
+        : null,
+    notes: row.notes,
+    observedAt: row.observed_at,
+    observedBy: row.observed_by,
+    createdAt: row.created_at,
+  };
+}
+
+function mapJunction(row: JunctionRow): UtilityJunctionRecord {
+  return {
+    id: row.id,
+    institutionId: row.institution_id,
+    assetId: row.asset_id,
+    connectedAssetId: row.connected_asset_id,
+    junctionKind: row.junction_kind,
+    label: row.label,
+    location: parsePointGeometry(row.geom) ?? { lat: 0, lng: 0 },
+    depthM: row.depth_m !== null ? Number(row.depth_m) : null,
+    depthMeasurementMethod: row.depth_measurement_method,
+    notes: row.notes,
+    recordedAt: row.recorded_at,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
   };
 }
 
@@ -900,6 +992,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
     let benchmarks: SurveyBenchmarkRecord[];
     let photoRows: { asset_id: string }[] = [];
     let docRows: { asset_id: string }[] = [];
+    let depthRows: { asset_id: string; depth_m: number }[] = [];
 
     const { data: assetData, error: assetErr } = await assetQuery;
     if (assetErr) {
@@ -913,6 +1006,14 @@ export class SupabaseDataGateway implements BadoDataGateway {
           .where('institutionId')
           .equals(institutionId)
           .toArray();
+        const cachedDepths = await badoDb.depthObservations
+          .where('institutionId')
+          .equals(institutionId)
+          .toArray();
+        depthRows = cachedDepths.map((d) => ({
+          asset_id: d.assetId,
+          depth_m: d.depthM,
+        }));
       } else {
         throw new Error(assetErr.message);
       }
@@ -934,7 +1035,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
       }
       assets = [...mergedMap.values()];
 
-      const [bmRes, photoRes, docRes] = await Promise.all([
+      const [bmRes, photoRes, docRes, depthRes] = await Promise.all([
         supabase
           .from('survey_benchmarks')
           .select('*')
@@ -947,12 +1048,20 @@ export class SupabaseDataGateway implements BadoDataGateway {
           .from('asset_documents')
           .select('asset_id')
           .eq('institution_id', institutionId),
+        supabase
+          .from('utility_depth_observations')
+          .select('asset_id, depth_m')
+          .eq('institution_id', institutionId),
       ]);
 
       benchmarks = (bmRes.data ?? []).map(mapBenchmark);
       await badoDb.surveyBenchmarks.bulkPut(benchmarks);
       photoRows = photoRes.data ?? [];
       docRows = docRes.data ?? [];
+      depthRows = (depthRes.data ?? []).map((row) => ({
+        asset_id: row.asset_id,
+        depth_m: Number(row.depth_m),
+      }));
       await recordCacheSync(
         institutionId,
         filters.campusId ?? null,
@@ -974,12 +1083,30 @@ export class SupabaseDataGateway implements BadoDataGateway {
     for (const d of docRows) {
       docCount.set(d.asset_id, (docCount.get(d.asset_id) ?? 0) + 1);
     }
+    const depthsByAsset = new Map<string, number[]>();
+    for (const row of depthRows) {
+      const list = depthsByAsset.get(row.asset_id) ?? [];
+      list.push(row.depth_m);
+      depthsByAsset.set(row.asset_id, list);
+    }
 
     const searchNeedle = (filters.search ?? '').trim().toLowerCase();
 
     return assets
       .filter((asset) => {
         if (filters.campusId && asset.campusId !== filters.campusId) return false;
+        if (
+          filters.operationalStatus &&
+          filters.operationalStatus !== 'all' &&
+          asset.operationalStatus !== filters.operationalStatus
+        ) {
+          return false;
+        }
+        if (filters.geometryScope && filters.geometryScope !== 'all') {
+          const linear = isLinearGeometry(asset.geometry);
+          if (filters.geometryScope === 'linear' && !linear) return false;
+          if (filters.geometryScope === 'points' && linear) return false;
+        }
         if (
           filters.verificationStatus === 'pending_review' &&
           !isPendingVerification(asset.verificationStatus)
@@ -1012,6 +1139,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
           if (!haystack.includes(searchNeedle)) return null;
         }
 
+        const depths = depthsByAsset.get(asset.id) ?? [];
         return {
           asset,
           assetType,
@@ -1020,6 +1148,9 @@ export class SupabaseDataGateway implements BadoDataGateway {
           benchmark,
           photoCount: photoCount.get(asset.id) ?? 0,
           documentCount: docCount.get(asset.id) ?? 0,
+          depthObservationCount: depths.length,
+          minDepthM: depths.length > 0 ? Math.min(...depths) : null,
+          maxDepthM: depths.length > 0 ? Math.max(...depths) : null,
         };
       })
       .filter((item): item is AssetListItem => item !== null)
@@ -1044,6 +1175,21 @@ export class SupabaseDataGateway implements BadoDataGateway {
       if (!navigator.onLine && cached && cached.institutionId === institutionId) {
         const cachedType = await badoDb.assetTypes.get(cached.assetTypeId);
         if (!cachedType) throw new Error('Cached asset type missing.');
+        const [cachedVertices, cachedDepths, cachedJunctions] =
+          await Promise.all([
+            badoDb.routeVertices
+              .where('[institutionId+assetId]')
+              .equals([institutionId, cached.id])
+              .toArray(),
+            badoDb.depthObservations
+              .where('[institutionId+assetId]')
+              .equals([institutionId, cached.id])
+              .toArray(),
+            badoDb.utilityJunctions
+              .where('[institutionId+assetId]')
+              .equals([institutionId, cached.id])
+              .toArray(),
+          ]);
         return {
           asset: cached,
           assetType: cachedType,
@@ -1054,12 +1200,24 @@ export class SupabaseDataGateway implements BadoDataGateway {
           benchmark: (await badoDb.surveyBenchmarks.get(cached.id)) ?? null,
           photoCount: 0,
           documentCount: 0,
+          depthObservationCount: cachedDepths.length,
+          minDepthM:
+            cachedDepths.length > 0
+              ? Math.min(...cachedDepths.map((d) => d.depthM))
+              : null,
+          maxDepthM:
+            cachedDepths.length > 0
+              ? Math.max(...cachedDepths.map((d) => d.depthM))
+              : null,
           registeredByName: null,
           lastVerifiedByName: null,
           referenceBenchmark: null,
           photos: [],
           documents: [],
           observations: [],
+          routeVertices: cachedVertices,
+          depthObservations: cachedDepths,
+          junctions: cachedJunctions,
           verificationHistory: [],
         };
       }
@@ -1075,6 +1233,9 @@ export class SupabaseDataGateway implements BadoDataGateway {
       photosRes,
       docsRes,
       obsRes,
+      verticesRes,
+      depthObsRes,
+      junctionsRes,
       histRes,
     ] = await Promise.all([
       this.listAssetTypes(institutionId),
@@ -1104,6 +1265,25 @@ export class SupabaseDataGateway implements BadoDataGateway {
         .eq('institution_id', institutionId)
         .eq('asset_id', asset.id)
         .order('measured_at', { ascending: false }),
+      supabase
+        .from('utility_route_vertices')
+        .select('*')
+        .eq('institution_id', institutionId)
+        .eq('asset_id', asset.id)
+        .order('part_index', { ascending: true })
+        .order('sequence_index', { ascending: true }),
+      supabase
+        .from('utility_depth_observations')
+        .select('*')
+        .eq('institution_id', institutionId)
+        .eq('asset_id', asset.id)
+        .order('chainage_m', { ascending: true }),
+      supabase
+        .from('utility_junctions')
+        .select('*')
+        .eq('institution_id', institutionId)
+        .eq('asset_id', asset.id)
+        .order('recorded_at', { ascending: true }),
       supabase
         .from('asset_verification_history')
         .select('*')
@@ -1164,6 +1344,20 @@ export class SupabaseDataGateway implements BadoDataGateway {
       }
     }
 
+    const routeVertices = (verticesRes.data ?? []).map(mapRouteVertex);
+    const depthObservations = (depthObsRes.data ?? []).map(mapDepthObservation);
+    const junctions = (junctionsRes.data ?? []).map(mapJunction);
+
+    if (routeVertices.length > 0) {
+      await badoDb.routeVertices.bulkPut(routeVertices);
+    }
+    if (depthObservations.length > 0) {
+      await badoDb.depthObservations.bulkPut(depthObservations);
+    }
+    if (junctions.length > 0) {
+      await badoDb.utilityJunctions.bulkPut(junctions);
+    }
+
     return {
       asset,
       assetType,
@@ -1174,12 +1368,24 @@ export class SupabaseDataGateway implements BadoDataGateway {
       benchmark: bmRes.data ? mapBenchmark(bmRes.data) : null,
       photoCount: photos.length,
       documentCount: documents.length,
+      depthObservationCount: depthObservations.length,
+      minDepthM:
+        depthObservations.length > 0
+          ? Math.min(...depthObservations.map((o) => o.depthM))
+          : null,
+      maxDepthM:
+        depthObservations.length > 0
+          ? Math.max(...depthObservations.map((o) => o.depthM))
+          : null,
       registeredByName: null,
       lastVerifiedByName: null,
       referenceBenchmark,
       photos,
       documents,
       observations: (obsRes.data ?? []).map(mapObservation),
+      routeVertices,
+      depthObservations,
+      junctions,
       verificationHistory: (histRes.data ?? []).map(mapHistory),
     };
   }
@@ -1280,6 +1486,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
         },
         installationDate: insertPayload.installation_date ?? null,
         operationalStatus: input.operationalStatus,
+        routeLengthM: null,
         physicalCondition: input.physicalCondition,
         verificationStatus: input.submissionMode,
         dataQuality: insertPayload.data_quality!,
@@ -1574,4 +1781,746 @@ export class SupabaseDataGateway implements BadoDataGateway {
     if (metaErr) throw new Error(metaErr.message);
     return mapDocument(data);
   }
+
+  async createLinearRoute(
+    institutionId: string,
+    rawInput: CreateLinearRouteInput,
+  ): Promise<AssetRecord> {
+    const input = createLinearRouteInputSchema.parse(rawInput);
+    const assetTypes = await this.listAssetTypes(institutionId);
+    const assetType = assetTypes.find((t) => t.id === input.assetTypeId);
+    if (!assetType) {
+      throw new Error('Selected asset type was not found for this institution.');
+    }
+    if (
+      !assetType.allowedGeomTypes.includes('LineString') &&
+      !assetType.allowedGeomTypes.includes('MultiLineString')
+    ) {
+      throw new Error(
+        `Asset type "${assetType.name}" does not support linear route geometries.`,
+      );
+    }
+
+    const cleanedAttributes = validateDynamicAttributes(
+      assetType,
+      input.customAttributes,
+      input.submissionMode,
+    );
+
+    const now = new Date().toISOString();
+    const id = input.id ?? crypto.randomUUID();
+    const capturedAt = input.capturedAt || now;
+    const measuredAt = input.measuredAt || capturedAt;
+    const routeLengthM = computeGeometryLengthM(input.geometry) ?? 0;
+    if (routeLengthM <= 0) {
+      throw new Error('Linear utility route must have a non-zero length.');
+    }
+
+    const hasDepthObs = input.depthObservations.length > 0;
+    const distinctDepths = new Set(
+      input.depthObservations.map((d) => Number(d.depthM.toFixed(2))),
+    );
+    const depthIsVariable = input.depthIsVariable || distinctDepths.size > 1;
+
+    const representativeDepth =
+      input.recordedDepthM ??
+      (hasDepthObs ? input.depthObservations[0].depthM : null);
+    const representativeDepthMethod =
+      input.depthMeasurementMethod ??
+      (hasDepthObs ? input.depthObservations[0].measurementMethod : null);
+    const documentedBeforeCovering =
+      input.documentedBeforeCovering ||
+      input.depthObservations.some((d) => d.documentedBeforeCovering);
+
+    const resolvedDataQuality: Database['public']['Enums']['data_quality'] =
+      input.submissionMode === 'draft' ? 'incomplete' : 'unverified';
+
+    const utilityGroup = assetType.utilityGroup;
+    const isCriticalHazard =
+      input.isCriticalHazard || assetType.utilityGroup === 'critical_hazard';
+
+    const assetInsert: Database['public']['Tables']['assets']['Insert'] = {
+      id,
+      institution_id: institutionId,
+      campus_id: input.campusId,
+      department_id: input.departmentId ?? null,
+      asset_type_id: assetType.id,
+      asset_code: input.assetCode,
+      name: input.name,
+      category: assetType.category,
+      utility_group: utilityGroup,
+      description: input.description ? input.description : null,
+      geom: geometryToEwkt(input.geometry),
+      installation_date: input.installationDate ? input.installationDate : null,
+      operational_status: input.operationalStatus,
+      physical_condition: input.physicalCondition,
+      verification_status: input.submissionMode,
+      data_quality: resolvedDataQuality,
+      is_critical_hazard: isCriticalHazard,
+      material: input.material ? input.material : null,
+      diameter_mm: input.diameterMm ?? null,
+      cable_specification: input.cableSpecification
+        ? input.cableSpecification
+        : null,
+      recorded_depth_m: representativeDepth,
+      depth_is_variable: depthIsVariable,
+      depth_measurement_method: representativeDepthMethod,
+      documented_before_covering: documentedBeforeCovering,
+      direction_description: input.directionDescription
+        ? input.directionDescription
+        : null,
+      construction_record_ref: input.constructionRecordRef
+        ? input.constructionRecordRef
+        : null,
+      custom_attributes: cleanedAttributes,
+      reference_benchmark_id: input.referenceBenchmarkId ?? null,
+      location_reference_text: input.locationReferenceText
+        ? input.locationReferenceText
+        : null,
+      notes: input.notes ? input.notes : null,
+      position_source: input.positionSource,
+      capture_method: input.captureMethod,
+      receiver_model: input.receiverModel ? input.receiverModel : null,
+      horizontal_accuracy_m: input.horizontalAccuracyM ?? null,
+      vertical_accuracy_m: input.verticalAccuracyM ?? null,
+      fix_quality: input.fixQuality,
+      correction_source: input.correctionSource ? input.correctionSource : null,
+      source_crs: input.sourceCrs,
+      measured_at: measuredAt,
+      is_manually_adjusted: input.isManuallyAdjusted,
+      captured_at: capturedAt,
+    };
+
+    const rawVertices =
+      input.vertices.length > 0
+        ? input.vertices
+        : buildFallbackVerticesFromGeometry(input.geometry, measuredAt);
+
+    const vertexRecords: UtilityRouteVertexRecord[] = buildRouteVertexRecords(
+      institutionId,
+      id,
+      rawVertices,
+      now,
+    );
+    const depthRecords: UtilityDepthObservationRecord[] =
+      input.depthObservations.map((obs) => {
+        const snap = snapPointToLinearRoute(input.geometry, {
+          lat: obs.latitude,
+          lng: obs.longitude,
+        });
+        return {
+          id: crypto.randomUUID(),
+          institutionId,
+          assetId: id,
+          location: { lat: obs.latitude, lng: obs.longitude },
+          depthM: obs.depthM,
+          measurementMethod: obs.measurementMethod,
+          documentedBeforeCovering: obs.documentedBeforeCovering ?? false,
+          chainageM: obs.chainageM ?? snap.chainageM,
+          horizontalAccuracyM: obs.horizontalAccuracyM ?? null,
+          notes: obs.notes ? obs.notes : null,
+          observedAt: obs.observedAt || now,
+          observedBy: null,
+          createdAt: now,
+        };
+      });
+    const junctionRecords: UtilityJunctionRecord[] = input.junctions.map(
+      (j) => ({
+        id: crypto.randomUUID(),
+        institutionId,
+        assetId: id,
+        connectedAssetId: j.connectedAssetId ?? null,
+        junctionKind: j.junctionKind ?? 'tee',
+        label: j.label ? j.label : null,
+        location: { lat: j.latitude, lng: j.longitude },
+        depthM: j.depthM ?? null,
+        depthMeasurementMethod: j.depthMeasurementMethod ?? null,
+        notes: j.notes ? j.notes : null,
+        recordedAt: j.recordedAt || now,
+        createdBy: null,
+        createdAt: now,
+      }),
+    );
+
+    const vertexInserts: Database['public']['Tables']['utility_route_vertices']['Insert'][] =
+      vertexRecords.map((v) => ({
+        id: v.id,
+        institution_id: institutionId,
+        asset_id: id,
+        part_index: v.partIndex,
+        sequence_index: v.sequenceIndex,
+        vertex_kind: v.vertexKind,
+        geom: geometryToEwkt({
+          type: 'Point',
+          coordinates: [v.location.lng, v.location.lat],
+        }),
+        chainage_m: v.chainageM,
+        horizontal_accuracy_m: v.horizontalAccuracyM,
+        vertical_accuracy_m: v.verticalAccuracyM,
+        fix_quality: v.fixQuality,
+        notes: v.notes,
+        recorded_at: v.recordedAt,
+      }));
+
+    const depthInserts: Database['public']['Tables']['utility_depth_observations']['Insert'][] =
+      depthRecords.map((d) => ({
+        id: d.id,
+        institution_id: institutionId,
+        asset_id: id,
+        geom: geometryToEwkt({
+          type: 'Point',
+          coordinates: [d.location.lng, d.location.lat],
+        }),
+        depth_m: d.depthM,
+        measurement_method: d.measurementMethod,
+        documented_before_covering: d.documentedBeforeCovering,
+        chainage_m: d.chainageM,
+        horizontal_accuracy_m: d.horizontalAccuracyM,
+        notes: d.notes,
+        observed_at: d.observedAt,
+      }));
+
+    const junctionInserts: Database['public']['Tables']['utility_junctions']['Insert'][] =
+      junctionRecords.map((j) => ({
+        id: j.id,
+        institution_id: institutionId,
+        asset_id: id,
+        connected_asset_id: j.connectedAssetId,
+        junction_kind: j.junctionKind,
+        label: j.label,
+        geom: geometryToEwkt({
+          type: 'Point',
+          coordinates: [j.location.lng, j.location.lat],
+        }),
+        depth_m: j.depthM,
+        depth_measurement_method: j.depthMeasurementMethod,
+        notes: j.notes,
+        recorded_at: j.recordedAt,
+      }));
+
+    if (input.saveOffline || !navigator.onLine) {
+      const localRecord: AssetRecord = {
+        id,
+        institutionId,
+        campusId: input.campusId,
+        departmentId: input.departmentId ?? null,
+        assetTypeId: assetType.id,
+        assetCode: input.assetCode,
+        name: input.name,
+        category: assetType.category,
+        utilityGroup,
+        description: assetInsert.description ?? null,
+        geometry: input.geometry,
+        installationDate: assetInsert.installation_date ?? null,
+        operationalStatus: input.operationalStatus,
+        routeLengthM,
+        physicalCondition: input.physicalCondition,
+        verificationStatus: input.submissionMode,
+        dataQuality: resolvedDataQuality,
+        isCriticalHazard,
+        material: assetInsert.material ?? null,
+        diameterMm: assetInsert.diameter_mm ?? null,
+        cableSpecification: assetInsert.cable_specification ?? null,
+        recordedDepthM: representativeDepth,
+        depthIsVariable,
+        depthMeasurementMethod: representativeDepthMethod,
+        documentedBeforeCovering,
+        directionDescription: assetInsert.direction_description ?? null,
+        constructionRecordRef: assetInsert.construction_record_ref ?? null,
+        customAttributes: cleanedAttributes,
+        referenceBenchmarkId: input.referenceBenchmarkId ?? null,
+        locationReferenceText: assetInsert.location_reference_text ?? null,
+        notes: assetInsert.notes ?? null,
+        positionSource: input.positionSource,
+        captureMethod: input.captureMethod,
+        receiverModel: assetInsert.receiver_model ?? null,
+        horizontalAccuracyM: input.horizontalAccuracyM ?? null,
+        verticalAccuracyM: input.verticalAccuracyM ?? null,
+        fixQuality: input.fixQuality,
+        correctionSource: assetInsert.correction_source ?? null,
+        sourceCrs: input.sourceCrs,
+        measuredAt,
+        isManuallyAdjusted: input.isManuallyAdjusted,
+        capturedAt,
+        lastVerifiedAt: null,
+        lastVerifiedBy: null,
+        version: 1,
+        createdBy: null,
+        updatedBy: null,
+        archivedAt: null,
+        archivedBy: null,
+        createdAt: now,
+        updatedAt: now,
+        localSyncStatus: 'pending',
+      };
+
+      await badoDb.transaction(
+        'rw',
+        [
+          badoDb.assets,
+          badoDb.routeVertices,
+          badoDb.depthObservations,
+          badoDb.utilityJunctions,
+        ],
+        async () => {
+          await badoDb.assets.put(localRecord);
+          if (vertexRecords.length > 0) {
+            await badoDb.routeVertices.bulkPut(vertexRecords);
+          }
+          if (depthRecords.length > 0) {
+            await badoDb.depthObservations.bulkPut(depthRecords);
+          }
+          if (junctionRecords.length > 0) {
+            await badoDb.utilityJunctions.bulkPut(junctionRecords);
+          }
+        },
+      );
+
+      await enqueueSyncOperation({
+        institutionId,
+        campusId: input.campusId,
+        recordType: 'assets',
+        recordId: id,
+        operationType: 'create',
+        payload: {
+          assetInsert,
+          routeVertexInserts: vertexInserts,
+          depthObservationInserts: depthInserts,
+          junctionInserts,
+        },
+        capturedAt,
+      });
+
+      return localRecord;
+    }
+
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase
+      .from('assets')
+      .insert(assetInsert)
+      .select('*')
+      .single();
+
+    if (error) {
+      if (error.code === '23505') {
+        throw new Error(
+          `Asset code "${input.assetCode}" already exists in this institution.`,
+        );
+      }
+      throw new Error(error.message);
+    }
+
+    if (vertexInserts.length > 0) {
+      const { error: vErr } = await supabase
+        .from('utility_route_vertices')
+        .insert(vertexInserts);
+      if (vErr) throw new Error(vErr.message);
+    }
+    if (depthInserts.length > 0) {
+      const { error: dErr } = await supabase
+        .from('utility_depth_observations')
+        .insert(depthInserts);
+      if (dErr) throw new Error(dErr.message);
+    }
+    if (junctionInserts.length > 0) {
+      const { error: jErr } = await supabase
+        .from('utility_junctions')
+        .insert(junctionInserts);
+      if (jErr) throw new Error(jErr.message);
+    }
+
+    const mapped = mapAsset(data);
+    await badoDb.assets.put(mapped);
+    if (vertexRecords.length > 0) {
+      await badoDb.routeVertices.bulkPut(vertexRecords);
+    }
+    if (depthRecords.length > 0) {
+      await badoDb.depthObservations.bulkPut(depthRecords);
+    }
+    if (junctionRecords.length > 0) {
+      await badoDb.utilityJunctions.bulkPut(junctionRecords);
+    }
+    return mapped;
+  }
+
+  async updateRouteGeometry(
+    institutionId: string,
+    rawInput: UpdateRouteGeometryInput,
+  ): Promise<AssetRecord> {
+    const input = updateRouteGeometryInputSchema.parse(rawInput);
+    const now = new Date().toISOString();
+    const rawVertices =
+      input.vertices.length > 0
+        ? input.vertices
+        : buildFallbackVerticesFromGeometry(input.geometry, now);
+    const vertexRecords = buildRouteVertexRecords(
+      institutionId,
+      input.assetId,
+      rawVertices,
+      now,
+    );
+
+    const updatePayload: Database['public']['Tables']['assets']['Update'] = {
+      geom: geometryToEwkt(input.geometry),
+      is_manually_adjusted: input.isManuallyAdjusted,
+      measured_at: now,
+    };
+    if (input.positionSource) updatePayload.position_source = input.positionSource;
+    if (input.captureMethod) updatePayload.capture_method = input.captureMethod;
+    if (input.horizontalAccuracyM !== undefined) {
+      updatePayload.horizontal_accuracy_m = input.horizontalAccuracyM;
+    }
+
+    const vertexInserts: Database['public']['Tables']['utility_route_vertices']['Insert'][] =
+      vertexRecords.map((v) => ({
+        id: v.id,
+        institution_id: institutionId,
+        asset_id: input.assetId,
+        part_index: v.partIndex,
+        sequence_index: v.sequenceIndex,
+        vertex_kind: v.vertexKind,
+        geom: geometryToEwkt({
+          type: 'Point',
+          coordinates: [v.location.lng, v.location.lat],
+        }),
+        chainage_m: v.chainageM,
+        horizontal_accuracy_m: v.horizontalAccuracyM,
+        vertical_accuracy_m: v.verticalAccuracyM,
+        fix_quality: v.fixQuality,
+        notes: v.notes,
+        recorded_at: v.recordedAt,
+      }));
+
+    const junctionRecords: UtilityJunctionRecord[] | undefined =
+      input.junctions?.map((jn) => ({
+        id: crypto.randomUUID(),
+        institutionId,
+        assetId: input.assetId,
+        connectedAssetId: jn.connectedAssetId ?? null,
+        junctionKind: jn.junctionKind ?? 'tee',
+        label: jn.label ? jn.label : null,
+        location: { lat: jn.latitude, lng: jn.longitude },
+        depthM: jn.depthM ?? null,
+        depthMeasurementMethod: jn.depthMeasurementMethod ?? null,
+        notes: jn.notes ? jn.notes : null,
+        recordedAt: jn.recordedAt || now,
+        createdBy: null,
+        createdAt: now,
+      }));
+
+    const junctionInserts:
+      | Database['public']['Tables']['utility_junctions']['Insert'][]
+      | undefined = junctionRecords?.map((j) => ({
+      id: j.id,
+      institution_id: institutionId,
+      asset_id: input.assetId,
+      connected_asset_id: j.connectedAssetId,
+      junction_kind: j.junctionKind,
+      label: j.label,
+      geom: geometryToEwkt({
+        type: 'Point',
+        coordinates: [j.location.lng, j.location.lat],
+      }),
+      depth_m: j.depthM,
+      depth_measurement_method: j.depthMeasurementMethod,
+      notes: j.notes,
+      recorded_at: j.recordedAt,
+    }));
+
+    if (input.saveOffline || !navigator.onLine) {
+      const existing = await badoDb.assets.get(input.assetId);
+      if (!existing || existing.institutionId !== institutionId) {
+        throw new Error('Route not available in offline cache for editing.');
+      }
+      const updatedLocal: AssetRecord = {
+        ...existing,
+        geometry: input.geometry,
+        routeLengthM: computeGeometryLengthM(input.geometry),
+        positionSource: input.positionSource ?? existing.positionSource,
+        captureMethod: input.captureMethod ?? existing.captureMethod,
+        horizontalAccuracyM:
+          input.horizontalAccuracyM !== undefined
+            ? input.horizontalAccuracyM
+            : existing.horizontalAccuracyM,
+        isManuallyAdjusted: input.isManuallyAdjusted,
+        measuredAt: now,
+        updatedAt: now,
+        version: existing.version + 1,
+        localSyncStatus: 'pending',
+      };
+
+      await badoDb.transaction(
+        'rw',
+        [badoDb.assets, badoDb.routeVertices, badoDb.utilityJunctions],
+        async () => {
+          await badoDb.assets.put(updatedLocal);
+          await badoDb.routeVertices
+            .where('[institutionId+assetId]')
+            .equals([institutionId, input.assetId])
+            .delete();
+          if (vertexRecords.length > 0) {
+            await badoDb.routeVertices.bulkPut(vertexRecords);
+          }
+          if (junctionRecords !== undefined) {
+            await badoDb.utilityJunctions
+              .where('[institutionId+assetId]')
+              .equals([institutionId, input.assetId])
+              .delete();
+            if (junctionRecords.length > 0) {
+              await badoDb.utilityJunctions.bulkPut(junctionRecords);
+            }
+          }
+        },
+      );
+
+      await enqueueSyncOperation({
+        institutionId,
+        campusId: existing.campusId,
+        recordType: 'assets',
+        recordId: existing.id,
+        operationType: 'update',
+        payload: {
+          assetUpdate: updatePayload,
+          routeVertexInserts: vertexInserts,
+          junctionInserts: junctionInserts ?? null,
+          editNotes: input.editNotes ?? null,
+        },
+        capturedAt: now,
+      });
+
+      return updatedLocal;
+    }
+
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase
+      .from('assets')
+      .update(updatePayload)
+      .eq('institution_id', institutionId)
+      .eq('id', input.assetId)
+      .select('*')
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    const { error: delErr } = await supabase
+      .from('utility_route_vertices')
+      .delete()
+      .eq('institution_id', institutionId)
+      .eq('asset_id', input.assetId);
+    if (delErr) throw new Error(delErr.message);
+
+    if (vertexInserts.length > 0) {
+      const { error: insErr } = await supabase
+        .from('utility_route_vertices')
+        .insert(vertexInserts);
+      if (insErr) throw new Error(insErr.message);
+    }
+
+    if (junctionInserts !== undefined) {
+      const { error: jDelErr } = await supabase
+        .from('utility_junctions')
+        .delete()
+        .eq('institution_id', institutionId)
+        .eq('asset_id', input.assetId);
+      if (jDelErr) throw new Error(jDelErr.message);
+      if (junctionInserts.length > 0) {
+        const { error: jInsErr } = await supabase
+          .from('utility_junctions')
+          .insert(junctionInserts);
+        if (jInsErr) throw new Error(jInsErr.message);
+      }
+    }
+
+    const mapped = mapAsset(data);
+    await badoDb.assets.put(mapped);
+    await badoDb.routeVertices
+      .where('[institutionId+assetId]')
+      .equals([institutionId, input.assetId])
+      .delete();
+    if (vertexRecords.length > 0) {
+      await badoDb.routeVertices.bulkPut(vertexRecords);
+    }
+    return mapped;
+  }
+
+  async addDepthObservation(
+    institutionId: string,
+    rawInput: AddDepthObservationInput,
+  ): Promise<UtilityDepthObservationRecord> {
+    const input = addDepthObservationInputSchema.parse(rawInput);
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const cachedAsset = await badoDb.assets.get(input.assetId);
+    const computedChainage =
+      input.chainageM ??
+      (cachedAsset && isLinearGeometry(cachedAsset.geometry)
+        ? snapPointToLinearRoute(cachedAsset.geometry, {
+            lat: input.latitude,
+            lng: input.longitude,
+          }).chainageM
+        : null);
+
+    const insertPayload: Database['public']['Tables']['utility_depth_observations']['Insert'] =
+      {
+        id,
+        institution_id: institutionId,
+        asset_id: input.assetId,
+        geom: geometryToEwkt({
+          type: 'Point',
+          coordinates: [input.longitude, input.latitude],
+        }),
+        depth_m: input.depthM,
+        measurement_method: input.measurementMethod,
+        documented_before_covering: input.documentedBeforeCovering,
+        chainage_m: computedChainage,
+        horizontal_accuracy_m: input.horizontalAccuracyM ?? null,
+        notes: input.notes ? input.notes : null,
+        observed_at: input.observedAt ?? now,
+      };
+
+    if (input.saveOffline || !navigator.onLine) {
+      const localObs: UtilityDepthObservationRecord = {
+        id,
+        institutionId,
+        assetId: input.assetId,
+        location: { lat: input.latitude, lng: input.longitude },
+        depthM: input.depthM,
+        measurementMethod: input.measurementMethod,
+        documentedBeforeCovering: input.documentedBeforeCovering,
+        chainageM: computedChainage,
+        horizontalAccuracyM: input.horizontalAccuracyM ?? null,
+        notes: input.notes ? input.notes : null,
+        observedAt: input.observedAt ?? now,
+        observedBy: null,
+        createdAt: now,
+      };
+      await badoDb.depthObservations.put(localObs);
+      await enqueueSyncOperation({
+        institutionId,
+        campusId: cachedAsset?.campusId ?? null,
+        recordType: 'utility_depth_observations',
+        recordId: id,
+        operationType: 'create',
+        payload: { depthObservationInsert: insertPayload },
+        capturedAt: localObs.observedAt,
+      });
+      return localObs;
+    }
+
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase
+      .from('utility_depth_observations')
+      .insert(insertPayload)
+      .select('*')
+      .single();
+    if (error) throw new Error(error.message);
+
+    const mapped = mapDepthObservation(data);
+    await badoDb.depthObservations.put(mapped);
+    return mapped;
+  }
+
+  async exportAssetsGeoJson(
+    institutionId: string,
+    filters: AssetListFilters = {},
+  ): Promise<BadoGeoJsonFeatureCollection> {
+    const supabase = getSupabaseClient();
+    const [items, institutionRes, campuses] = await Promise.all([
+      this.listAssets(institutionId, filters),
+      supabase
+        .from('institutions')
+        .select('name, is_demo')
+        .eq('id', institutionId)
+        .maybeSingle(),
+      filters.campusId ? this.listCampuses(institutionId) : Promise.resolve([]),
+    ]);
+
+    const campusName = filters.campusId
+      ? (campuses.find((c) => c.id === filters.campusId)?.name ?? null)
+      : null;
+
+    return buildInstitutionalGeoJsonExport(items, {
+      institutionName: institutionRes.data?.name ?? 'BADO Institution',
+      isDemoInstitution: Boolean(institutionRes.data?.is_demo),
+      campusName,
+    });
+  }
 }
+
+type NonEmptyVertexInput = NonNullable<CreateLinearRouteInput['vertices']>[number];
+
+function buildFallbackVerticesFromGeometry(
+  geometry: CreateLinearRouteInput['geometry'],
+  recordedAt: string,
+): NonEmptyVertexInput[] {
+  const parts =
+    geometry.type === 'LineString'
+      ? [geometry.coordinates]
+      : geometry.coordinates;
+  const out: NonEmptyVertexInput[] = [];
+  parts.forEach((part, partIndex) => {
+    part.forEach((coord, seqIndex) => {
+      out.push({
+        partIndex,
+        sequenceIndex: seqIndex,
+        vertexKind:
+          seqIndex === 0
+            ? 'start_point'
+            : seqIndex === part.length - 1
+              ? 'end_point'
+              : 'track_point',
+        longitude: coord[0],
+        latitude: coord[1],
+        recordedAt,
+      });
+    });
+  });
+  return out;
+}
+
+function buildRouteVertexRecords(
+  institutionId: string,
+  assetId: string,
+  vertices: NonEmptyVertexInput[],
+  now: string,
+): UtilityRouteVertexRecord[] {
+  const grouped = new Map<number, NonEmptyVertexInput[]>();
+  for (const v of vertices) {
+    const part = v.partIndex ?? 0;
+    const list = grouped.get(part) ?? [];
+    list.push(v);
+    grouped.set(part, list);
+  }
+  const records: UtilityRouteVertexRecord[] = [];
+  for (const [partIndex, partVertices] of [...grouped.entries()].sort(
+    (a, b) => a[0] - b[0],
+  )) {
+    const ordered = [...partVertices].sort(
+      (a, b) => a.sequenceIndex - b.sequenceIndex,
+    );
+    const chainages = computeVertexChainagesM(
+      ordered.map((v) => ({ lat: v.latitude, lng: v.longitude })),
+    );
+    ordered.forEach((v, idx) => {
+      records.push({
+        id: crypto.randomUUID(),
+        institutionId,
+        assetId,
+        partIndex,
+        sequenceIndex: idx,
+        vertexKind: v.vertexKind ?? 'track_point',
+        location: { lat: v.latitude, lng: v.longitude },
+        chainageM: v.chainageM ?? chainages[idx] ?? 0,
+        horizontalAccuracyM: v.horizontalAccuracyM ?? null,
+        verticalAccuracyM: v.verticalAccuracyM ?? null,
+        fixQuality: v.fixQuality ?? 'unknown',
+        notes: v.notes ? v.notes : null,
+        recordedAt: v.recordedAt || now,
+        createdBy: null,
+        createdAt: now,
+      });
+    });
+  }
+  return records;
+}
+

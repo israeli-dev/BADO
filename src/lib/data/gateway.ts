@@ -1,12 +1,16 @@
 import { z } from 'zod';
 import type {
+  AddDepthObservationInput,
   CreateAssetInput,
+  CreateLinearRouteInput,
   ReviewVerificationInput,
+  UpdateRouteGeometryInput,
 } from '@/lib/assets/validation';
 import {
   institutionThresholdsSchema,
   legendEntrySchema,
 } from '@/lib/config/legend';
+import type { BadoGeoJsonFeatureCollection } from '@/lib/gis/geojsonIo';
 import {
   APP_ROLES,
   type AppRole,
@@ -28,6 +32,7 @@ import {
   type LegendEntry,
   type PhotoKind,
   type UserInstitutionMembership,
+  type UtilityDepthObservationRecord,
 } from '@/types/domain';
 
 export const signInSchema = z.object({
@@ -227,6 +232,24 @@ export interface BadoDataGateway {
     institutionId: string,
     input: UploadAssetDocumentInput,
   ): Promise<AssetDocumentRecord>;
+
+  // Phase 3 — Linear Infrastructure Mapping, Depth Observations & GeoJSON Export
+  createLinearRoute(
+    institutionId: string,
+    input: CreateLinearRouteInput,
+  ): Promise<AssetRecord>;
+  updateRouteGeometry(
+    institutionId: string,
+    input: UpdateRouteGeometryInput,
+  ): Promise<AssetRecord>;
+  addDepthObservation(
+    institutionId: string,
+    input: AddDepthObservationInput,
+  ): Promise<UtilityDepthObservationRecord>;
+  exportAssetsGeoJson(
+    institutionId: string,
+    filters?: AssetListFilters,
+  ): Promise<BadoGeoJsonFeatureCollection>;
 }
 
 /** Backwards-compatible alias for Phase 1 consumers. */

@@ -43,3 +43,16 @@
     outline-offset: 2px;
   }
 }
+
+/* Keep Leaflet panes beneath app navigation drawers, sticky headers, and modals */
+.bado-leaflet-container.leaflet-container {
+  z-index: 0;
+  font-family: var(--font-sans);
+  background-color: #e2e8f0;
+}
+
+.bado-marker-icon {
+  background: transparent;
+  border: 0;
+}
+

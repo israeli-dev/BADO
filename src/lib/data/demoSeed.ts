@@ -1,6 +1,7 @@
 import { buildInstitutionAssetTypes } from '@/lib/assets/defaultAssetTypes';
 import { cloneDefaultLegend } from '@/lib/config/legend';
 import type { BadoLocalDatabase } from '@/lib/db/badoDb';
+import { computeGeometryLengthM } from '@/lib/gis/geometry';
 import type {
   AppRole,
   AssetRecord,
@@ -14,6 +15,9 @@ import type {
   SurveyBenchmarkRecord,
   UserInstitutionMembership,
   UserProfile,
+  UtilityDepthObservationRecord,
+  UtilityJunctionRecord,
+  UtilityRouteVertexRecord,
 } from '@/types/domain';
 
 /**
@@ -954,6 +958,132 @@ export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
     },
   ];
 
+  // Ensure every seeded linear utility route carries an accurate geodesic length
+  const hydratedAssets: AssetRecord[] = assets.map((asset) => ({
+    ...asset,
+    routeLengthM: computeGeometryLengthM(asset.geometry),
+  }));
+
+  const routeVertices: UtilityRouteVertexRecord[] = [
+    {
+      id: '81000000-0000-4000-8000-000000000001',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetWaterPipe1,
+      partIndex: 0,
+      sequenceIndex: 0,
+      vertexKind: 'start_point',
+      location: { lat: 7.3045, lng: 5.1389 },
+      chainageM: 0,
+      horizontalAccuracyM: 4.1,
+      verticalAccuracyM: null,
+      fixQuality: 'autonomous',
+      notes: 'Simulated wellhead outlet flange near BH-DEMO-001.',
+      recordedAt: SEED_TIMESTAMP,
+      createdBy: DEMO_IDS.userTechnician,
+      createdAt: SEED_TIMESTAMP,
+    },
+    {
+      id: '81000000-0000-4000-8000-000000000002',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetWaterPipe1,
+      partIndex: 0,
+      sequenceIndex: 1,
+      vertexKind: 'bend',
+      location: { lat: 7.3042, lng: 5.1394 },
+      chainageM: 64.5,
+      horizontalAccuracyM: 4.5,
+      verticalAccuracyM: null,
+      fixQuality: 'autonomous',
+      notes: 'Simulated 30° bend entering steel sleeve beneath internal road.',
+      recordedAt: SEED_TIMESTAMP,
+      createdBy: DEMO_IDS.userTechnician,
+      createdAt: SEED_TIMESTAMP,
+    },
+    {
+      id: '81000000-0000-4000-8000-000000000003',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetWaterPipe1,
+      partIndex: 0,
+      sequenceIndex: 2,
+      vertexKind: 'end_point',
+      location: { lat: 7.304, lng: 5.1402 },
+      chainageM: 155.6,
+      horizontalAccuracyM: 4.8,
+      verticalAccuracyM: null,
+      fixQuality: 'autonomous',
+      notes: 'Simulated riser inlet connection at WT-DEMO-001.',
+      recordedAt: SEED_TIMESTAMP,
+      createdBy: DEMO_IDS.userTechnician,
+      createdAt: SEED_TIMESTAMP,
+    },
+  ];
+
+  const depthObservations: UtilityDepthObservationRecord[] = [
+    {
+      id: '82000000-0000-4000-8000-000000000001',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetWaterPipe1,
+      location: { lat: 7.3045, lng: 5.1389 },
+      depthM: 1.1,
+      measurementMethod: 'open_trench_tape',
+      documentedBeforeCovering: true,
+      chainageM: 0,
+      horizontalAccuracyM: 4.1,
+      notes: 'Measured to crown of 110 mm HDPE pipe at wellhead exit (Simulated).',
+      observedAt: SEED_TIMESTAMP,
+      observedBy: DEMO_IDS.userTechnician,
+      createdAt: SEED_TIMESTAMP,
+    },
+    {
+      id: '82000000-0000-4000-8000-000000000002',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetWaterPipe1,
+      location: { lat: 7.3042, lng: 5.1394 },
+      depthM: 1.55,
+      measurementMethod: 'open_trench_tape',
+      documentedBeforeCovering: true,
+      chainageM: 64.5,
+      horizontalAccuracyM: 4.5,
+      notes: 'Deeper cover beneath road crossing with 160 mm protective sleeve (Simulated).',
+      observedAt: SEED_TIMESTAMP,
+      observedBy: DEMO_IDS.userTechnician,
+      createdAt: SEED_TIMESTAMP,
+    },
+    {
+      id: '82000000-0000-4000-8000-000000000003',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetElecCable1,
+      location: { lat: 7.3043, lng: 5.139 },
+      depthM: 0.9,
+      measurementMethod: 'as_built_record',
+      documentedBeforeCovering: false,
+      chainageM: 119.8,
+      horizontalAccuracyM: 11.4,
+      notes: 'Recorded from legacy electrical schematic; requires EM locator check (Simulated).',
+      observedAt: SEED_TIMESTAMP,
+      observedBy: DEMO_IDS.userSurveyor,
+      createdAt: SEED_TIMESTAMP,
+    },
+  ];
+
+  const utilityJunctions: UtilityJunctionRecord[] = [
+    {
+      id: '83000000-0000-4000-8000-000000000001',
+      institutionId: DEMO_IDS.primaryInstitution,
+      assetId: DEMO_IDS.assetWaterPipe1,
+      connectedAssetId: null,
+      junctionKind: 'tee',
+      label: 'Hostel Block B 63mm Service Tee (Simulated)',
+      location: { lat: 7.3042, lng: 5.1394 },
+      depthM: 1.5,
+      depthMeasurementMethod: 'open_trench_tape',
+      notes: 'Includes isolation gate valve inside concrete valve box (Simulated).',
+      recordedAt: SEED_TIMESTAMP,
+      createdBy: DEMO_IDS.userTechnician,
+      createdAt: SEED_TIMESTAMP,
+    },
+  ];
+
   await db.transaction(
     'rw',
     [
@@ -967,6 +1097,9 @@ export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
       db.assets,
       db.surveyBenchmarks,
       db.verificationHistory,
+      db.routeVertices,
+      db.depthObservations,
+      db.utilityJunctions,
       db.auditLogs,
     ],
     async () => {
@@ -980,9 +1113,12 @@ export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
         await db.auditLogs.bulkPut(auditLogs);
       }
       await db.assetTypes.bulkPut(allAssetTypes);
-      await db.assets.bulkPut(assets);
+      await db.assets.bulkPut(hydratedAssets);
       await db.surveyBenchmarks.bulkPut(benchmarks);
       await db.verificationHistory.bulkPut(verificationHistory);
+      await db.routeVertices.bulkPut(routeVertices);
+      await db.depthObservations.bulkPut(depthObservations);
+      await db.utilityJunctions.bulkPut(utilityJunctions);
     },
   );
 }

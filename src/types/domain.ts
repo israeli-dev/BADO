@@ -297,6 +297,34 @@ export const DOCUMENT_KINDS = [
 
 export type DocumentKind = (typeof DOCUMENT_KINDS)[number];
 
+export const VERTEX_KINDS = [
+  'start_point',
+  'track_point',
+  'bend',
+  'junction',
+  'valve',
+  'manhole',
+  'depth_point',
+  'note_point',
+  'end_point',
+] as const;
+
+export type VertexKind = (typeof VERTEX_KINDS)[number];
+
+export const JUNCTION_KINDS = [
+  'tee',
+  'cross',
+  'elbow',
+  'reducer',
+  'chamber',
+  'splice_box',
+  'manhole',
+  'service_tap',
+  'other',
+] as const;
+
+export type JunctionKind = (typeof JUNCTION_KINDS)[number];
+
 export type AllowedGeometryType =
   | 'Point'
   | 'LineString'
@@ -352,6 +380,8 @@ export interface AssetRecord {
   utilityGroup: UtilityGroup;
   description: string | null;
   geometry: Geometry;
+  /** Geodesic route length in metres for LineString / MultiLineString assets. */
+  routeLengthM?: number | null;
   installationDate: string | null;
   operationalStatus: OperationalStatus;
   physicalCondition: PhysicalCondition;
@@ -508,6 +538,57 @@ export interface LocalMediaBlobRecord {
   createdAt: string;
 }
 
+export interface UtilityRouteVertexRecord {
+  id: string;
+  institutionId: string;
+  assetId: string;
+  partIndex: number;
+  sequenceIndex: number;
+  vertexKind: VertexKind;
+  location: GeoCoordinates;
+  chainageM: number | null;
+  horizontalAccuracyM: number | null;
+  verticalAccuracyM: number | null;
+  fixQuality: GnssFixQuality;
+  notes: string | null;
+  recordedAt: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface UtilityDepthObservationRecord {
+  id: string;
+  institutionId: string;
+  assetId: string;
+  location: GeoCoordinates;
+  depthM: number;
+  measurementMethod: DepthMeasurementMethod;
+  documentedBeforeCovering: boolean;
+  chainageM: number | null;
+  horizontalAccuracyM: number | null;
+  notes: string | null;
+  observedAt: string;
+  observedBy: string | null;
+  observedByName?: string | null;
+  createdAt: string;
+}
+
+export interface UtilityJunctionRecord {
+  id: string;
+  institutionId: string;
+  assetId: string;
+  connectedAssetId: string | null;
+  junctionKind: JunctionKind;
+  label: string | null;
+  location: GeoCoordinates;
+  depthM: number | null;
+  depthMeasurementMethod: DepthMeasurementMethod | null;
+  notes: string | null;
+  recordedAt: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 export interface AssetListItem {
   asset: AssetRecord;
   assetType: AssetTypeDefinition;
@@ -516,6 +597,9 @@ export interface AssetListItem {
   benchmark: SurveyBenchmarkRecord | null;
   photoCount: number;
   documentCount: number;
+  depthObservationCount?: number;
+  minDepthM?: number | null;
+  maxDepthM?: number | null;
 }
 
 export interface AssetDetailBundle extends AssetListItem {
@@ -531,6 +615,9 @@ export interface AssetDetailBundle extends AssetListItem {
   photos: AssetPhotoRecord[];
   documents: AssetDocumentRecord[];
   observations: AssetObservationRecord[];
+  routeVertices: UtilityRouteVertexRecord[];
+  depthObservations: UtilityDepthObservationRecord[];
+  junctions: UtilityJunctionRecord[];
   verificationHistory: AssetVerificationEvent[];
 }
 
@@ -540,7 +627,9 @@ export interface AssetListFilters {
   category?: AssetCategory | 'all';
   assetTypeId?: string | 'all';
   utilityGroup?: UtilityGroup | 'all';
+  operationalStatus?: OperationalStatus | 'all';
   verificationStatus?: VerificationStatus | 'pending_review' | 'all';
+  geometryScope?: 'all' | 'points' | 'linear';
 }
 
 // -----------------------------------------------------------------------------

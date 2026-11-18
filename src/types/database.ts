@@ -10,6 +10,7 @@ import type {
   DocumentKind,
   DynamicFieldDefinition,
   GnssFixQuality,
+  JunctionKind,
   LegendEntry,
   LegendLineStyle,
   OperationalStatus,
@@ -18,10 +19,11 @@ import type {
   PositionSource,
   UtilityGroup,
   VerificationStatus,
+  VertexKind,
 } from './domain';
 
 /**
- * Typed Supabase schema contract matching Phase 1 & Phase 2 migrations.
+ * Typed Supabase schema contract matching Phases 1–3 migrations.
  */
 export type Json =
   | string
@@ -297,6 +299,7 @@ export interface Database {
           utility_group: UtilityGroup;
           description: string | null;
           geom: unknown;
+          route_length_m: number | null;
           installation_date: string | null;
           operational_status: OperationalStatus;
           physical_condition: PhysicalCondition;
@@ -403,6 +406,14 @@ export interface Database {
           reference_benchmark_id?: string | null;
           location_reference_text?: string | null;
           notes?: string | null;
+          geom?: string;
+          position_source?: PositionSource;
+          capture_method?: CaptureMethod;
+          horizontal_accuracy_m?: number | null;
+          vertical_accuracy_m?: number | null;
+          fix_quality?: GnssFixQuality;
+          measured_at?: string;
+          is_manually_adjusted?: boolean;
           archived_at?: string | null;
         };
         Relationships: [];
@@ -628,6 +639,127 @@ export interface Database {
         Update: never;
         Relationships: [];
       };
+      utility_route_vertices: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          part_index: number;
+          sequence_index: number;
+          vertex_kind: VertexKind;
+          geom: unknown;
+          chainage_m: number | null;
+          horizontal_accuracy_m: number | null;
+          vertical_accuracy_m: number | null;
+          fix_quality: GnssFixQuality;
+          notes: string | null;
+          recorded_at: string;
+          created_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          part_index?: number;
+          sequence_index: number;
+          vertex_kind?: VertexKind;
+          geom: unknown;
+          chainage_m?: number | null;
+          horizontal_accuracy_m?: number | null;
+          vertical_accuracy_m?: number | null;
+          fix_quality?: GnssFixQuality;
+          notes?: string | null;
+          recorded_at?: string;
+          created_by?: string | null;
+        };
+        Update: {
+          vertex_kind?: VertexKind;
+          geom?: unknown;
+          chainage_m?: number | null;
+          notes?: string | null;
+        };
+        Relationships: [];
+      };
+      utility_depth_observations: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          geom: unknown;
+          depth_m: number;
+          measurement_method: DepthMeasurementMethod;
+          documented_before_covering: boolean;
+          chainage_m: number | null;
+          horizontal_accuracy_m: number | null;
+          notes: string | null;
+          observed_at: string;
+          observed_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          geom: unknown;
+          depth_m: number;
+          measurement_method: DepthMeasurementMethod;
+          documented_before_covering?: boolean;
+          chainage_m?: number | null;
+          horizontal_accuracy_m?: number | null;
+          notes?: string | null;
+          observed_at?: string;
+          observed_by?: string | null;
+        };
+        Update: {
+          depth_m?: number;
+          measurement_method?: DepthMeasurementMethod;
+          documented_before_covering?: boolean;
+          notes?: string | null;
+        };
+        Relationships: [];
+      };
+      utility_junctions: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          connected_asset_id: string | null;
+          junction_kind: JunctionKind;
+          label: string | null;
+          geom: unknown;
+          depth_m: number | null;
+          depth_measurement_method: DepthMeasurementMethod | null;
+          notes: string | null;
+          recorded_at: string;
+          created_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          connected_asset_id?: string | null;
+          junction_kind?: JunctionKind;
+          label?: string | null;
+          geom: unknown;
+          depth_m?: number | null;
+          depth_measurement_method?: DepthMeasurementMethod | null;
+          notes?: string | null;
+          recorded_at?: string;
+          created_by?: string | null;
+        };
+        Update: {
+          connected_asset_id?: string | null;
+          junction_kind?: JunctionKind;
+          label?: string | null;
+          geom?: unknown;
+          depth_m?: number | null;
+          depth_measurement_method?: DepthMeasurementMethod | null;
+          notes?: string | null;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -670,6 +802,8 @@ export interface Database {
       position_source: PositionSource;
       capture_method: CaptureMethod;
       depth_measurement_method: DepthMeasurementMethod;
+      vertex_kind: VertexKind;
+      junction_kind: JunctionKind;
     };
     CompositeTypes: Record<string, never>;
   };
