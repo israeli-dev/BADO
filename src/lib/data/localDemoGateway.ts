@@ -1,13 +1,19 @@
 import { z } from 'zod';
 import { isPendingVerification } from '@/lib/assets/labels';
 import {
+  addDepthObservationInputSchema,
   createAssetInputSchema,
+  createLinearRouteInputSchema,
   reviewVerificationSchema,
+  updateRouteGeometryInputSchema,
   uploadAssetDocumentMetaSchema,
   uploadAssetPhotoMetaSchema,
   validateDynamicAttributes,
+  type AddDepthObservationInput,
   type CreateAssetInput,
+  type CreateLinearRouteInput,
   type ReviewVerificationInput,
+  type UpdateRouteGeometryInput,
 } from '@/lib/assets/validation';
 import {
   institutionThresholdsSchema,
@@ -28,10 +34,24 @@ import {
 } from '@/lib/data/gateway';
 import { badoDb, type BadoLocalDatabase } from '@/lib/db/badoDb';
 import {
+  buildInstitutionalGeoJsonExport,
+  type BadoGeoJsonFeatureCollection,
+} from '@/lib/gis/geojsonIo';
+import {
+  computeGeometryLengthM,
+  computeVertexChainagesM,
+  isLinearGeometry,
+  snapPointToLinearRoute,
+} from '@/lib/gis/geometry';
+import {
   preparePhotoForStorage,
   validateDocumentFile,
 } from '@/lib/media/fileValidation';
-import { assertPermission, canAccessCampus } from '@/lib/permissions/rbac';
+import {
+  assertPermission,
+  canAccessCampus,
+  roleHasPermission,
+} from '@/lib/permissions/rbac';
 import { enqueueSyncOperation, recordCacheSync } from '@/lib/sync/syncQueue';
 import type {
   AppRole,
@@ -55,6 +75,9 @@ import type {
   LegendEntry,
   SurveyBenchmarkRecord,
   UserInstitutionMembership,
+  UtilityDepthObservationRecord,
+  UtilityJunctionRecord,
+  UtilityRouteVertexRecord,
 } from '@/types/domain';
 
 const DEMO_SESSION_STORAGE_KEY = 'bado.demo.activeUserId';
@@ -760,6 +783,7 @@ export class LocalDemoDataGateway implements BadoDataGateway {
       allBenchmarks,
       allPhotos,
       allDocuments,
+      allDepthObs,
     ] = await Promise.all([
       this.db.assets.where('institutionId').equals(institutionId).toArray(),
       this.db.assetTypes.where('institutionId').equals(institutionId).toArray(),
@@ -774,12 +798,35 @@ export class LocalDemoDataGateway implements BadoDataGateway {
         .where('institutionId')
         .equals(institutionId)
         .toArray(),
+      this.db.depthObservations
+        .where('institutionId')
+        .equals(institutionId)
+        .toArray(),
     ]);
 
     const typeById = new Map(allTypes.map((t) => [t.id, t]));
     const campusById = new Map(allCampuses.map((c) => [c.id, c]));
     const deptById = new Map(allDepartments.map((d) => [d.id, d]));
     const benchmarkByAssetId = new Map(allBenchmarks.map((b) => [b.assetId, b]));
+
+    const depthStatsByAsset = new Map<
+      string,
+      { count: number; min: number; max: number }
+    >();
+    for (const obs of allDepthObs) {
+      const existing = depthStatsByAsset.get(obs.assetId);
+      if (!existing) {
+        depthStatsByAsset.set(obs.assetId, {
+          count: 1,
+          min: obs.depthM,
+          max: obs.depthM,
+        });
+      } else {
+        existing.count += 1;
+        existing.min = Math.min(existing.min, obs.depthM);
+        existing.max = Math.max(existing.max, obs.depthM);
+      }
+    }
 
     const photoCountByAsset = new Map<string, number>();
     for (const photo of allPhotos) {
@@ -826,6 +873,18 @@ export class LocalDemoDataGateway implements BadoDataGateway {
       ) {
         continue;
       }
+      if (
+        filters.operationalStatus &&
+        filters.operationalStatus !== 'all' &&
+        asset.operationalStatus !== filters.operationalStatus
+      ) {
+        continue;
+      }
+      if (filters.geometryScope && filters.geometryScope !== 'all') {
+        const linear = isLinearGeometry(asset.geometry);
+        if (filters.geometryScope === 'linear' && !linear) continue;
+        if (filters.geometryScope === 'points' && linear) continue;
+      }
       if (filters.verificationStatus && filters.verificationStatus !== 'all') {
         if (filters.verificationStatus === 'pending_review') {
           if (!isPendingVerification(asset.verificationStatus)) continue;
@@ -862,14 +921,23 @@ export class LocalDemoDataGateway implements BadoDataGateway {
         if (!haystack.includes(searchNeedle)) continue;
       }
 
+      const depthStat = depthStatsByAsset.get(asset.id);
+      const enrichedAsset: AssetRecord =
+        asset.routeLengthM === undefined && isLinearGeometry(asset.geometry)
+          ? { ...asset, routeLengthM: computeGeometryLengthM(asset.geometry) }
+          : asset;
+
       filtered.push({
-        asset,
+        asset: enrichedAsset,
         assetType,
         campus,
         department,
         benchmark,
         photoCount: photoCountByAsset.get(asset.id) ?? 0,
         documentCount: docCountByAsset.get(asset.id) ?? 0,
+        depthObservationCount: depthStat?.count ?? 0,
+        minDepthM: depthStat?.min ?? null,
+        maxDepthM: depthStat?.max ?? null,
       });
     }
 
@@ -909,6 +977,9 @@ export class LocalDemoDataGateway implements BadoDataGateway {
       rawPhotos,
       rawDocuments,
       observations,
+      rawVertices,
+      rawDepthObs,
+      rawJunctions,
       history,
     ] = await Promise.all([
       this.db.assetTypes.get(asset.assetTypeId),
@@ -932,6 +1003,18 @@ export class LocalDemoDataGateway implements BadoDataGateway {
         .equals([institutionId, asset.id])
         .toArray(),
       this.db.assetObservations
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+      this.db.routeVertices
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+      this.db.depthObservations
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+      this.db.utilityJunctions
         .where('[institutionId+assetId]')
         .equals([institutionId, asset.id])
         .toArray(),
@@ -990,14 +1073,47 @@ export class LocalDemoDataGateway implements BadoDataGateway {
       documents.push({ ...doc, downloadUrl });
     }
 
+    const depthObservations: UtilityDepthObservationRecord[] = [];
+    for (const obs of rawDepthObs.sort((a, b) =>
+      (a.chainageM ?? Number.MAX_SAFE_INTEGER) -
+        (b.chainageM ?? Number.MAX_SAFE_INTEGER) ||
+      b.observedAt.localeCompare(a.observedAt),
+    )) {
+      const observerProfile = obs.observedBy
+        ? await this.db.profiles.get(obs.observedBy)
+        : undefined;
+      depthObservations.push({
+        ...obs,
+        observedByName:
+          obs.observedByName ?? observerProfile?.fullName ?? null,
+      });
+    }
+
+    const minDepthM =
+      depthObservations.length > 0
+        ? Math.min(...depthObservations.map((o) => o.depthM))
+        : null;
+    const maxDepthM =
+      depthObservations.length > 0
+        ? Math.max(...depthObservations.map((o) => o.depthM))
+        : null;
+
+    const hydratedAsset: AssetRecord =
+      asset.routeLengthM === undefined && isLinearGeometry(asset.geometry)
+        ? { ...asset, routeLengthM: computeGeometryLengthM(asset.geometry) }
+        : asset;
+
     return {
-      asset,
+      asset: hydratedAsset,
       assetType,
       campus: campus ?? null,
       department: department ?? null,
       benchmark: benchmark ?? null,
       photoCount: photos.length,
       documentCount: documents.length,
+      depthObservationCount: depthObservations.length,
+      minDepthM,
+      maxDepthM,
       registeredByName: registeredByProfile?.fullName ?? null,
       lastVerifiedByName: verifiedByProfile?.fullName ?? null,
       referenceBenchmark,
@@ -1005,6 +1121,13 @@ export class LocalDemoDataGateway implements BadoDataGateway {
       documents,
       observations: observations.sort((a, b) =>
         b.measuredAt.localeCompare(a.measuredAt),
+      ),
+      routeVertices: rawVertices.sort(
+        (a, b) => a.partIndex - b.partIndex || a.sequenceIndex - b.sequenceIndex,
+      ),
+      depthObservations,
+      junctions: rawJunctions.sort((a, b) =>
+        a.recordedAt.localeCompare(b.recordedAt),
       ),
       verificationHistory: history.sort((a, b) =>
         b.createdAt.localeCompare(a.createdAt),
@@ -1697,5 +1820,683 @@ export class LocalDemoDataGateway implements BadoDataGateway {
       ...record,
       downloadUrl: buildBlobObjectUrl(validatedFile.blob),
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3 — Linear Utility Mapping, Multi-Point Depths & GeoJSON Export
+  // ---------------------------------------------------------------------------
+
+  async createLinearRoute(
+    institutionId: string,
+    rawInput: CreateLinearRouteInput,
+  ): Promise<AssetRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'routes:record');
+
+    const input = createLinearRouteInputSchema.parse(rawInput);
+
+    if (input.captureMethod === 'geojson_import') {
+      assertPermission(membership, institutionId, 'gis:import');
+    }
+
+    const campus = await this.db.campuses.get(input.campusId);
+    if (!campus || campus.institutionId !== institutionId || !campus.isActive) {
+      throw new Error('Selected campus does not belong to the active institution.');
+    }
+    if (!canAccessCampus(membership, campus.id)) {
+      throw new Error(
+        'ACCESS DENIED: You are not permitted to record routes on this campus.',
+      );
+    }
+
+    if (input.departmentId) {
+      const dept = await this.db.departments.get(input.departmentId);
+      if (!dept || dept.institutionId !== institutionId) {
+        throw new Error(
+          'Selected department does not belong to the active institution.',
+        );
+      }
+    }
+
+    const assetType = await this.db.assetTypes.get(input.assetTypeId);
+    if (!assetType || assetType.institutionId !== institutionId) {
+      throw new Error(
+        'Selected asset type does not belong to the active institution.',
+      );
+    }
+    if (
+      !assetType.allowedGeomTypes.includes('LineString') &&
+      !assetType.allowedGeomTypes.includes('MultiLineString')
+    ) {
+      throw new Error(
+        `Asset type "${assetType.name}" does not support linear route geometries.`,
+      );
+    }
+
+    if (input.referenceBenchmarkId) {
+      const bm = await this.db.surveyBenchmarks.get(input.referenceBenchmarkId);
+      if (!bm || bm.institutionId !== institutionId) {
+        throw new Error(
+          'Referenced survey benchmark does not belong to the active institution.',
+        );
+      }
+    }
+
+    const existingCode = await this.db.assets
+      .where('[institutionId+assetCode]')
+      .equals([institutionId, input.assetCode])
+      .first();
+    if (existingCode) {
+      throw new Error(
+        `An asset or route with ID "${input.assetCode}" already exists in this institution.`,
+      );
+    }
+
+    // Validate connected assets on junctions belong to the same institution
+    for (const jn of input.junctions) {
+      if (jn.connectedAssetId) {
+        const connected = await this.db.assets.get(jn.connectedAssetId);
+        if (!connected || connected.institutionId !== institutionId) {
+          throw new Error(
+            'Connected junction asset does not belong to the active institution.',
+          );
+        }
+      }
+    }
+
+    const cleanedAttributes = validateDynamicAttributes(
+      assetType,
+      input.customAttributes,
+      input.submissionMode,
+    );
+
+    const now = new Date().toISOString();
+    const capturedAt = input.capturedAt || now;
+    const measuredAt = input.measuredAt || capturedAt;
+    const assetId = input.id ?? crypto.randomUUID();
+    const routeLengthM = computeGeometryLengthM(input.geometry) ?? 0;
+    if (routeLengthM <= 0) {
+      throw new Error('Linear utility route must have a non-zero length.');
+    }
+
+    const verificationStatus = input.submissionMode; // strictly 'draft' | 'submitted'
+    const dataQuality: DataQuality =
+      verificationStatus === 'draft' ? 'incomplete' : 'unverified';
+
+    // Default recordedDepthM summary from first explicit depth observation when omitted
+    const firstDepthObs = input.depthObservations[0];
+    const recordedDepthM =
+      input.recordedDepthM ?? (firstDepthObs ? firstDepthObs.depthM : null);
+    const depthMeasurementMethod =
+      input.depthMeasurementMethod ??
+      (firstDepthObs ? firstDepthObs.measurementMethod : null);
+    const documentedBeforeCovering =
+      input.documentedBeforeCovering ||
+      input.depthObservations.some((d) => d.documentedBeforeCovering);
+
+    const asset: AssetRecord = {
+      id: assetId,
+      institutionId,
+      campusId: campus.id,
+      departmentId: input.departmentId ?? null,
+      assetTypeId: assetType.id,
+      assetCode: input.assetCode,
+      name: input.name,
+      category: assetType.category,
+      utilityGroup: assetType.utilityGroup,
+      description: input.description ? input.description : null,
+      geometry: input.geometry,
+      routeLengthM,
+      installationDate: input.installationDate ? input.installationDate : null,
+      operationalStatus: input.operationalStatus,
+      physicalCondition: input.physicalCondition,
+      verificationStatus,
+      dataQuality,
+      isCriticalHazard:
+        input.isCriticalHazard || assetType.utilityGroup === 'critical_hazard',
+      material: input.material ? input.material : null,
+      diameterMm: input.diameterMm ?? null,
+      cableSpecification: input.cableSpecification
+        ? input.cableSpecification
+        : null,
+      recordedDepthM,
+      depthIsVariable: input.depthIsVariable,
+      depthMeasurementMethod,
+      documentedBeforeCovering,
+      directionDescription: input.directionDescription
+        ? input.directionDescription
+        : null,
+      constructionRecordRef: input.constructionRecordRef
+        ? input.constructionRecordRef
+        : null,
+      customAttributes: cleanedAttributes,
+      referenceBenchmarkId: input.referenceBenchmarkId ?? null,
+      locationReferenceText: input.locationReferenceText
+        ? input.locationReferenceText
+        : null,
+      notes: input.notes ? input.notes : null,
+      positionSource: input.positionSource,
+      captureMethod: input.captureMethod,
+      receiverModel: input.receiverModel ? input.receiverModel : null,
+      horizontalAccuracyM: input.horizontalAccuracyM ?? null,
+      verticalAccuracyM: input.verticalAccuracyM ?? null,
+      fixQuality: input.fixQuality,
+      correctionSource: input.correctionSource ? input.correctionSource : null,
+      sourceCrs: input.sourceCrs,
+      measuredAt,
+      isManuallyAdjusted: input.isManuallyAdjusted,
+      capturedAt,
+      lastVerifiedAt: null,
+      lastVerifiedBy: null,
+      version: 1,
+      createdBy: session.user.id,
+      updatedBy: session.user.id,
+      archivedAt: null,
+      archivedBy: null,
+      createdAt: now,
+      updatedAt: now,
+      localSyncStatus: input.saveOffline ? 'pending' : 'synced',
+    };
+
+    // Build ordered vertex records (either explicit vertices or derived from geometry)
+    const vertexRecords = this.buildVertexRecords(
+      institutionId,
+      assetId,
+      input.geometry,
+      input.vertices,
+      session.user.id,
+      capturedAt,
+      now,
+    );
+
+    const depthRecords: UtilityDepthObservationRecord[] =
+      input.depthObservations.map((obs) => {
+        const snap = snapPointToLinearRoute(input.geometry, {
+          lat: obs.latitude,
+          lng: obs.longitude,
+        });
+        return {
+          id: crypto.randomUUID(),
+          institutionId,
+          assetId,
+          location: { lat: obs.latitude, lng: obs.longitude },
+          depthM: obs.depthM,
+          measurementMethod: obs.measurementMethod,
+          documentedBeforeCovering: obs.documentedBeforeCovering ?? false,
+          chainageM: obs.chainageM ?? snap.chainageM,
+          horizontalAccuracyM: obs.horizontalAccuracyM ?? null,
+          notes: obs.notes ? obs.notes : null,
+          observedAt: obs.observedAt || capturedAt,
+          observedBy: session.user.id,
+          observedByName: session.user.fullName,
+          createdAt: now,
+        };
+      });
+
+    const junctionRecords: UtilityJunctionRecord[] = input.junctions.map(
+      (jn) => ({
+        id: crypto.randomUUID(),
+        institutionId,
+        assetId,
+        connectedAssetId: jn.connectedAssetId ?? null,
+        junctionKind: jn.junctionKind ?? 'tee',
+        label: jn.label ? jn.label : null,
+        location: { lat: jn.latitude, lng: jn.longitude },
+        depthM: jn.depthM ?? null,
+        depthMeasurementMethod: jn.depthMeasurementMethod ?? null,
+        notes: jn.notes ? jn.notes : null,
+        recordedAt: jn.recordedAt || capturedAt,
+        createdBy: session.user.id,
+        createdAt: now,
+      }),
+    );
+
+    const initialEvent: AssetVerificationEvent = {
+      id: crypto.randomUUID(),
+      institutionId,
+      assetId,
+      fromStatus: null,
+      toStatus: verificationStatus,
+      reviewerId: session.user.id,
+      reviewerName: session.user.fullName,
+      reviewerRole: membership.role,
+      remarks:
+        verificationStatus === 'draft'
+          ? `Saved linear route draft (${routeLengthM.toFixed(1)} m, ${vertexRecords.length} vertices).`
+          : `Submitted linear utility route (${routeLengthM.toFixed(1)} m, ${vertexRecords.length} vertices) via ${input.captureMethod}.`,
+      createdAt: now,
+    };
+
+    await this.db.transaction(
+      'rw',
+      [
+        this.db.assets,
+        this.db.routeVertices,
+        this.db.depthObservations,
+        this.db.utilityJunctions,
+        this.db.verificationHistory,
+      ],
+      async () => {
+        await this.db.assets.add(asset);
+        if (vertexRecords.length > 0) {
+          await this.db.routeVertices.bulkAdd(vertexRecords);
+        }
+        if (depthRecords.length > 0) {
+          await this.db.depthObservations.bulkAdd(depthRecords);
+        }
+        if (junctionRecords.length > 0) {
+          await this.db.utilityJunctions.bulkAdd(junctionRecords);
+        }
+        await this.db.verificationHistory.add(initialEvent);
+      },
+    );
+
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: input.captureMethod === 'geojson_import' ? 'import' : 'insert',
+      entityType: 'assets',
+      entityId: assetId,
+      summary: `Mapped linear utility route ${asset.assetCode} ("${asset.name}", ${routeLengthM.toFixed(1)} m, ${depthRecords.length} depth observation(s)).`,
+      oldData: null,
+      newData: {
+        assetCode: asset.assetCode,
+        captureMethod: asset.captureMethod,
+        routeLengthM,
+        vertexCount: vertexRecords.length,
+        depthObservations: depthRecords.length,
+        junctions: junctionRecords.length,
+      },
+    });
+
+    if (input.saveOffline) {
+      await enqueueSyncOperation(
+        {
+          institutionId,
+          campusId: campus.id,
+          recordType: 'linear_routes',
+          recordId: assetId,
+          operationType: 'create',
+          payload: {
+            asset,
+            vertices: vertexRecords,
+            depthObservations: depthRecords,
+            junctions: junctionRecords,
+          },
+          baseVersion: 1,
+          capturedAt,
+        },
+        this.db,
+      );
+    }
+
+    return asset;
+  }
+
+  async updateRouteGeometry(
+    institutionId: string,
+    rawInput: UpdateRouteGeometryInput,
+  ): Promise<AssetRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    const input = updateRouteGeometryInputSchema.parse(rawInput);
+
+    const existing = await this.db.assets.get(input.assetId);
+    if (!existing || existing.institutionId !== institutionId || existing.archivedAt) {
+      throw new Error('Target route was not found in the active institution.');
+    }
+    if (!canAccessCampus(membership, existing.campusId)) {
+      throw new Error(
+        'ACCESS DENIED: You are not permitted to edit routes on this campus.',
+      );
+    }
+
+    const canEditAnyGeometry = roleHasPermission(
+      membership.role,
+      'routes:edit_geometry',
+    );
+    const canEditOwnUnverified =
+      roleHasPermission(membership.role, 'assets:edit_own_draft') &&
+      existing.createdBy === session.user.id &&
+      (existing.verificationStatus === 'draft' ||
+        existing.verificationStatus === 'rejected' ||
+        existing.verificationStatus === 'needs_resurvey');
+
+    if (!canEditAnyGeometry && !canEditOwnUnverified) {
+      throw new Error(
+        'ACCESS DENIED: Your role is not authorised to modify this route geometry.',
+      );
+    }
+
+    const routeLengthM = computeGeometryLengthM(input.geometry) ?? 0;
+    if (routeLengthM <= 0) {
+      throw new Error('Updated route geometry must have a non-zero length.');
+    }
+
+    const now = new Date().toISOString();
+    const updated: AssetRecord = {
+      ...existing,
+      geometry: input.geometry,
+      routeLengthM,
+      captureMethod: input.captureMethod ?? existing.captureMethod,
+      positionSource: input.positionSource ?? existing.positionSource,
+      horizontalAccuracyM:
+        input.horizontalAccuracyM !== undefined
+          ? input.horizontalAccuracyM
+          : existing.horizontalAccuracyM,
+      isManuallyAdjusted: input.isManuallyAdjusted,
+      measuredAt: now,
+      version: existing.version + 1,
+      updatedBy: session.user.id,
+      updatedAt: now,
+      localSyncStatus: input.saveOffline ? 'pending' : existing.localSyncStatus,
+    };
+
+    const vertexRecords = this.buildVertexRecords(
+      institutionId,
+      existing.id,
+      input.geometry,
+      input.vertices,
+      session.user.id,
+      now,
+      now,
+    );
+
+    await this.db.transaction(
+      'rw',
+      [this.db.assets, this.db.routeVertices, this.db.utilityJunctions],
+      async () => {
+        await this.db.assets.put(updated);
+        await this.db.routeVertices
+          .where('[institutionId+assetId]')
+          .equals([institutionId, existing.id])
+          .delete();
+        if (vertexRecords.length > 0) {
+          await this.db.routeVertices.bulkAdd(vertexRecords);
+        }
+        if (input.junctions !== undefined) {
+          await this.db.utilityJunctions
+            .where('[institutionId+assetId]')
+            .equals([institutionId, existing.id])
+            .delete();
+          const newJunctions: UtilityJunctionRecord[] = input.junctions.map(
+            (jn) => ({
+              id: crypto.randomUUID(),
+              institutionId,
+              assetId: existing.id,
+              connectedAssetId: jn.connectedAssetId ?? null,
+              junctionKind: jn.junctionKind ?? 'tee',
+              label: jn.label ? jn.label : null,
+              location: { lat: jn.latitude, lng: jn.longitude },
+              depthM: jn.depthM ?? null,
+              depthMeasurementMethod: jn.depthMeasurementMethod ?? null,
+              notes: jn.notes ? jn.notes : null,
+              recordedAt: jn.recordedAt || now,
+              createdBy: session.user.id,
+              createdAt: now,
+            }),
+          );
+          if (newJunctions.length > 0) {
+            await this.db.utilityJunctions.bulkAdd(newJunctions);
+          }
+        }
+      },
+    );
+
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'update',
+      entityType: 'assets',
+      entityId: existing.id,
+      summary: `Updated spatial route geometry for ${existing.assetCode} (${existing.routeLengthM ?? 0} m → ${routeLengthM.toFixed(1)} m, ${vertexRecords.length} vertices).`,
+      oldData: {
+        routeLengthM: existing.routeLengthM ?? null,
+        version: existing.version,
+      },
+      newData: {
+        routeLengthM,
+        vertexCount: vertexRecords.length,
+        version: updated.version,
+        editNotes: input.editNotes ?? null,
+      },
+    });
+
+    if (input.saveOffline) {
+      await enqueueSyncOperation(
+        {
+          institutionId,
+          campusId: existing.campusId,
+          recordType: 'linear_routes',
+          recordId: existing.id,
+          operationType: 'update',
+          payload: {
+            geometry: input.geometry,
+            vertices: vertexRecords,
+            editNotes: input.editNotes ?? null,
+          },
+          baseVersion: existing.version,
+          capturedAt: now,
+        },
+        this.db,
+      );
+    }
+
+    return updated;
+  }
+
+  async addDepthObservation(
+    institutionId: string,
+    rawInput: AddDepthObservationInput,
+  ): Promise<UtilityDepthObservationRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'assets:create');
+
+    const input = addDepthObservationInputSchema.parse(rawInput);
+
+    const asset = await this.db.assets.get(input.assetId);
+    if (!asset || asset.institutionId !== institutionId || asset.archivedAt) {
+      throw new Error('Target asset not found in the active institution.');
+    }
+    if (!canAccessCampus(membership, asset.campusId)) {
+      throw new Error(
+        'ACCESS DENIED: You are not permitted to record depth observations on this campus.',
+      );
+    }
+
+    let chainageM = input.chainageM ?? null;
+    if (chainageM === null && isLinearGeometry(asset.geometry)) {
+      chainageM = snapPointToLinearRoute(asset.geometry, {
+        lat: input.latitude,
+        lng: input.longitude,
+      }).chainageM;
+    }
+
+    const now = new Date().toISOString();
+    const observedAt = input.observedAt || now;
+    const record: UtilityDepthObservationRecord = {
+      id: crypto.randomUUID(),
+      institutionId,
+      assetId: asset.id,
+      location: { lat: input.latitude, lng: input.longitude },
+      depthM: input.depthM,
+      measurementMethod: input.measurementMethod,
+      documentedBeforeCovering: input.documentedBeforeCovering,
+      chainageM,
+      horizontalAccuracyM: input.horizontalAccuracyM ?? null,
+      notes: input.notes ? input.notes : null,
+      observedAt,
+      observedBy: session.user.id,
+      observedByName: session.user.fullName,
+      createdAt: now,
+    };
+
+    await this.db.depthObservations.add(record);
+
+    // If the parent asset had no nominal depth yet, populate it and mark variable
+    if (asset.recordedDepthM === null) {
+      await this.db.assets.update(asset.id, {
+        recordedDepthM: record.depthM,
+        depthMeasurementMethod: record.measurementMethod,
+        depthIsVariable: true,
+        updatedAt: now,
+      });
+    } else if (asset.recordedDepthM !== record.depthM && !asset.depthIsVariable) {
+      await this.db.assets.update(asset.id, {
+        depthIsVariable: true,
+        updatedAt: now,
+      });
+    }
+
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'insert',
+      entityType: 'utility_depth_observations',
+      entityId: record.id,
+      summary: `Recorded ${record.depthM.toFixed(2)} m burial depth observation (${record.measurementMethod}) on ${asset.assetCode}.`,
+      oldData: null,
+      newData: {
+        assetCode: asset.assetCode,
+        depthM: record.depthM,
+        measurementMethod: record.measurementMethod,
+        chainageM: record.chainageM,
+      },
+    });
+
+    if (input.saveOffline) {
+      await enqueueSyncOperation(
+        {
+          institutionId,
+          campusId: asset.campusId,
+          recordType: 'utility_depth_observations',
+          recordId: record.id,
+          operationType: 'create',
+          payload: { ...record },
+          baseVersion: 1,
+          capturedAt: observedAt,
+        },
+        this.db,
+      );
+    }
+
+    return record;
+  }
+
+  async exportAssetsGeoJson(
+    institutionId: string,
+    filters: AssetListFilters = {},
+  ): Promise<BadoGeoJsonFeatureCollection> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'gis:export');
+
+    const [institution, campus, items] = await Promise.all([
+      this.db.institutions.get(institutionId),
+      filters.campusId
+        ? this.db.campuses.get(filters.campusId)
+        : Promise.resolve(undefined),
+      this.listAssets(institutionId, filters),
+    ]);
+
+    const collection = buildInstitutionalGeoJsonExport(items, {
+      institutionName: institution?.name ?? 'Institution',
+      isDemoInstitution: institution?.isDemo ?? true,
+      campusName: campus?.name ?? null,
+    });
+
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'export',
+      entityType: 'assets',
+      entityId: institutionId,
+      summary: `Exported ${collection.features.length} spatial feature(s) as EPSG:4326 GeoJSON.`,
+      oldData: null,
+      newData: {
+        featureCount: collection.features.length,
+        campusId: filters.campusId ?? 'all',
+        category: filters.category ?? 'all',
+      },
+    });
+
+    return collection;
+  }
+
+  private buildVertexRecords(
+    institutionId: string,
+    assetId: string,
+    geometry: CreateLinearRouteInput['geometry'],
+    explicitVertices: NonNullable<CreateLinearRouteInput['vertices']>,
+    userId: string,
+    defaultRecordedAt: string,
+    createdAt: string,
+  ): UtilityRouteVertexRecord[] {
+    if (explicitVertices.length >= 2) {
+      const coords = explicitVertices.map((v) => ({
+        lat: v.latitude,
+        lng: v.longitude,
+      }));
+      const chainages = computeVertexChainagesM(coords);
+      return explicitVertices.map((v, idx) => ({
+        id: crypto.randomUUID(),
+        institutionId,
+        assetId,
+        partIndex: v.partIndex ?? 0,
+        sequenceIndex: v.sequenceIndex,
+        vertexKind: v.vertexKind ?? 'track_point',
+        location: { lat: v.latitude, lng: v.longitude },
+        chainageM: v.chainageM ?? chainages[idx] ?? null,
+        horizontalAccuracyM: v.horizontalAccuracyM ?? null,
+        verticalAccuracyM: v.verticalAccuracyM ?? null,
+        fixQuality: v.fixQuality ?? 'unknown',
+        notes: v.notes ? v.notes : null,
+        recordedAt: v.recordedAt || defaultRecordedAt,
+        createdBy: userId,
+        createdAt,
+      }));
+    }
+
+    const parts =
+      geometry.type === 'LineString'
+        ? [geometry.coordinates]
+        : geometry.coordinates;
+
+    const records: UtilityRouteVertexRecord[] = [];
+    parts.forEach((part, partIdx) => {
+      const partCoords = part.map(([lng, lat]) => ({ lat, lng }));
+      const chainages = computeVertexChainagesM(partCoords);
+      part.forEach(([lng, lat], seqIdx) => {
+        records.push({
+          id: crypto.randomUUID(),
+          institutionId,
+          assetId,
+          partIndex: partIdx,
+          sequenceIndex: seqIdx,
+          vertexKind:
+            seqIdx === 0
+              ? 'start_point'
+              : seqIdx === part.length - 1
+                ? 'end_point'
+                : 'track_point',
+          location: { lat, lng },
+          chainageM: chainages[seqIdx] ?? null,
+          horizontalAccuracyM: null,
+          verticalAccuracyM: null,
+          fixQuality: 'unknown',
+          notes: null,
+          recordedAt: defaultRecordedAt,
+          createdBy: userId,
+          createdAt,
+        });
+      });
+    });
+    return records;
   }
 }

@@ -17,6 +17,9 @@ import type {
   SyncQueueRecord,
   UserInstitutionMembership,
   UserProfile,
+  UtilityDepthObservationRecord,
+  UtilityJunctionRecord,
+  UtilityRouteVertexRecord,
 } from '@/types/domain';
 
 /**
@@ -47,6 +50,11 @@ export class BadoLocalDatabase extends Dexie {
   assetPhotos!: EntityTable<AssetPhotoRecord, 'id'>;
   assetDocuments!: EntityTable<AssetDocumentRecord, 'id'>;
   localMediaBlobs!: EntityTable<LocalMediaBlobRecord, 'id'>;
+
+  // Phase 3 stores (Linear infrastructure vertices, depth observations & junctions)
+  routeVertices!: EntityTable<UtilityRouteVertexRecord, 'id'>;
+  depthObservations!: EntityTable<UtilityDepthObservationRecord, 'id'>;
+  utilityJunctions!: EntityTable<UtilityJunctionRecord, 'id'>;
 
   constructor(dbName = 'bado_local_v1') {
     super(dbName);
@@ -79,6 +87,15 @@ export class BadoLocalDatabase extends Dexie {
       assetPhotos: 'id, institutionId, [institutionId+assetId], createdAt',
       assetDocuments: 'id, institutionId, [institutionId+assetId], createdAt',
       localMediaBlobs: 'id, institutionId, [institutionId+assetId], mediaKind',
+    });
+
+    this.version(3).stores({
+      routeVertices:
+        'id, institutionId, [institutionId+assetId], [assetId+partIndex+sequenceIndex]',
+      depthObservations:
+        'id, institutionId, [institutionId+assetId], observedAt',
+      utilityJunctions:
+        'id, institutionId, [institutionId+assetId], connectedAssetId',
     });
   }
 }

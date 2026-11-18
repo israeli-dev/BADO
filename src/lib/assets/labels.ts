@@ -5,12 +5,14 @@ import type {
   DepthMeasurementMethod,
   DocumentKind,
   GnssFixQuality,
+  JunctionKind,
   OperationalStatus,
   PhotoKind,
   PhysicalCondition,
   PositionSource,
   UtilityGroup,
   VerificationStatus,
+  VertexKind,
 } from '@/types/domain';
 
 export const ASSET_CATEGORY_LABELS: Record<AssetCategory, string> = {
@@ -157,6 +159,41 @@ export const SURVEY_METHOD_OPTIONS = [
   'Handheld / Smartphone Reconnaissance GPS',
 ] as const;
 
+export const VERTEX_KIND_LABELS: Record<VertexKind, string> = {
+  start_point: 'Route Start',
+  track_point: 'Track Vertex',
+  bend: 'Bend / Change of Direction',
+  junction: 'Junction / Tee',
+  valve: 'Inline Valve',
+  manhole: 'Manhole / Chamber',
+  depth_point: 'Depth Check Point',
+  note_point: 'Field Note Point',
+  end_point: 'Route End',
+};
+
+export const JUNCTION_KIND_LABELS: Record<JunctionKind, string> = {
+  tee: 'Tee Connection',
+  cross: '4-Way Cross',
+  elbow: '90° / Angled Elbow',
+  reducer: 'Diameter Reducer',
+  chamber: 'Draw Pit / Chamber',
+  splice_box: 'Fibre / Cable Splice Box',
+  manhole: 'Inspection Manhole',
+  service_tap: 'Building Service Tap',
+  other: 'Other Connection',
+};
+
 export function isPendingVerification(status: VerificationStatus): boolean {
   return status === 'submitted' || status === 'under_review' || status === 'needs_resurvey';
 }
+
+export function formatRouteLength(lengthM: number | null | undefined): string {
+  if (lengthM === null || lengthM === undefined || !Number.isFinite(lengthM)) {
+    return '—';
+  }
+  if (lengthM >= 1000) {
+    return `${(lengthM / 1000).toFixed(2)} km`;
+  }
+  return `${lengthM.toFixed(1)} m`;
+}
+

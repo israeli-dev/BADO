@@ -33,6 +33,9 @@ const SyncQueuePage = lazy(() =>
   })),
 );
 
+const InfrastructureMapPage = lazy(() => import('@/features/map/InfrastructureMapPage').then(m => ({ default: m.InfrastructureMapPage })));
+const LinearRoutePage = lazy(() => import('@/features/routes/LinearRoutePage').then(m => ({ default: m.LinearRoutePage })));
+
 function RouteLoadingFallback() {
   return (
     <div role="status" className="py-12 text-center text-sm text-slate-600">
@@ -88,41 +91,9 @@ export function AppRoutes() {
           }
         />
 
-        <Route
-          path="map"
-          element={
-            <ProtectedRoute requiredPermission="infrastructure:view">
-              <PlannedModulePage
-                title="Infrastructure Map"
-                phaseLabel="Phase 3"
-                summary="Interactive Leaflet & PostGIS campus infrastructure map with configurable legend and layer filtering."
-                plannedCapabilities={[
-                  'Campus boundaries, surface asset markers, continuous utility polylines, and survey benchmarks.',
-                  'Filtering by campus, category, utility group, operational condition, and verification status.',
-                  'Slide-up asset and route detail panels with depth observations and photographs.',
-                ]}
-              />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="routes/new"
-          element={
-            <ProtectedRoute requiredPermission="routes:record">
-              <PlannedModulePage
-                title="Trace Linear Infrastructure"
-                phaseLabel="Phase 3"
-                summary="Continuous LINESTRING route documentation for pipelines, electrical cables, fibre ducts, and drainage."
-                plannedCapabilities={[
-                  'GPS Walk-and-Record with explicit Start, Pause/Resume, accuracy readout, bends, junctions, and trench photos.',
-                  'Manual interactive map vertex drawing and editing for authorised roles.',
-                  'Validated GeoJSON import/export and multi-point burial depth observations along each route.',
-                ]}
-              />
-            </ProtectedRoute>
-          }
-        />
+        <Route path="map" element={<ProtectedRoute requiredPermission="infrastructure:view"><Suspense fallback={<RouteLoadingFallback />}><InfrastructureMapPage /></Suspense></ProtectedRoute>} />
+        <Route path="routes/new" element={<ProtectedRoute requiredPermission="routes:record"><Suspense fallback={<RouteLoadingFallback />}><LinearRoutePage /></Suspense></ProtectedRoute>} />
+        <Route path="routes/:assetId/edit" element={<ProtectedRoute requiredPermission="routes:edit_geometry"><Suspense fallback={<RouteLoadingFallback />}><LinearRoutePage /></Suspense></ProtectedRoute>} />
 
         <Route
           path="dig-check"

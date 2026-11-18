@@ -15,6 +15,7 @@ import {
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Alert } from '@/components/ui/Alert';
+import { MapPinPicker } from '@/components/map/MapPinPicker';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -1078,6 +1079,8 @@ export function AssetRegistrationPage() {
               Capture Current GPS
             </Button>
 
+            <MapPinPicker latitude={parseOptionalNumber(latText)} longitude={parseOptionalNumber(lngText)} campusCenter={selectedCampus?.center} onSelectPosition={(coords) => { setLatText(String(coords.lat)); setLngText(String(coords.lng)); setPositionSource('manual_map'); setCaptureMethod('manual_pin'); setIsManuallyAdjusted(true); }} />
+            {can('routes:record') && <p className="text-sm"><Link className="text-blue-700 underline" to="/routes/new">Recording a pipeline or cable? Record a route instead.</Link></p>}
             {selectedCampus?.center && (
               <Button
                 type="button"
