@@ -12,6 +12,8 @@ import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Alert } from '@/components/ui/Alert';
 import { AssetMiniMap } from '@/components/map/AssetMiniMap';
+import { DepthObservationForm } from '@/features/routes/DepthObservationForm';
+import { isLinearGeometry } from '@/lib/gis/geometry';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -325,6 +327,7 @@ export function AssetDetailPage() {
         {asset.routeLengthM != null && <p className="mt-2 text-sm">Route length: {asset.routeLengthM.toFixed(1)} m · {detail.routeVertices.length} recorded vertices</p>}
         {detail.depthObservations.length > 0 && <div className="mt-3"><h3 className="font-semibold">Depth observations</h3><ul>{detail.depthObservations.map(d => <li key={d.id}>{d.depthM} m · {DEPTH_METHOD_LABELS[d.measurementMethod]} · {d.chainageM == null ? 'chainage unknown' : `chainage ${d.chainageM.toFixed(1)} m`} {d.documentedBeforeCovering ? '· before covering' : ''}</li>)}</ul></div>}
         {detail.junctions.length > 0 && <div className="mt-3"><h3 className="font-semibold">Utility junctions</h3><ul>{detail.junctions.map(j => <li key={j.id}>{j.label || j.junctionKind}{j.depthM != null ? ` · ${j.depthM} m` : ''}</li>)}</ul></div>}
+        {can('assets:create') && isLinearGeometry(asset.geometry) && <DepthObservationForm assetId={asset.id} geometry={asset.geometry} />}
       </Card>
 
       {/* Asset Header Banner */}
