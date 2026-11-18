@@ -1,41 +1,87 @@
-import { legendEntrySchema, institutionThresholdsSchema } from '@/lib/config/legend';
+import { z } from 'zod';
+import { isPendingVerification } from '@/lib/assets/labels';
+import {
+  createAssetInputSchema,
+  reviewVerificationSchema,
+  uploadAssetDocumentMetaSchema,
+  uploadAssetPhotoMetaSchema,
+  validateDynamicAttributes,
+  type CreateAssetInput,
+  type ReviewVerificationInput,
+} from '@/lib/assets/validation';
+import {
+  institutionThresholdsSchema,
+  legendEntrySchema,
+} from '@/lib/config/legend';
 import { ensureDemoSeedData } from '@/lib/data/demoSeed';
 import {
   createCampusSchema,
   createDepartmentSchema,
+  type BadoDataGateway,
+  type BenchmarkReferenceOption,
   type CreateCampusInput,
   type CreateDepartmentInput,
-  type FoundationDataGateway,
   type SignInInput,
   type UpdateSettingsInput,
+  type UploadAssetDocumentInput,
+  type UploadAssetPhotoInput,
 } from '@/lib/data/gateway';
 import { badoDb, type BadoLocalDatabase } from '@/lib/db/badoDb';
+import {
+  preparePhotoForStorage,
+  validateDocumentFile,
+} from '@/lib/media/fileValidation';
 import { assertPermission, canAccessCampus } from '@/lib/permissions/rbac';
-import { recordCacheSync } from '@/lib/sync/syncQueue';
+import { enqueueSyncOperation, recordCacheSync } from '@/lib/sync/syncQueue';
 import type {
   AppRole,
+  AssetCategory,
+  AssetDetailBundle,
+  AssetDocumentRecord,
+  AssetListFilters,
+  AssetListItem,
+  AssetPhotoRecord,
+  AssetRecord,
+  AssetTypeDefinition,
+  AssetVerificationEvent,
   AuditAction,
   AuditLogEntry,
   AuthSessionState,
   Campus,
   DashboardSummary,
+  DataQuality,
   Department,
   InstitutionSettings,
   LegendEntry,
+  SurveyBenchmarkRecord,
   UserInstitutionMembership,
 } from '@/types/domain';
-import { z } from 'zod';
 
 const DEMO_SESSION_STORAGE_KEY = 'bado.demo.activeUserId';
+
+function buildBlobObjectUrl(blob: unknown): string | null {
+  if (
+    blob instanceof Blob &&
+    typeof URL !== 'undefined' &&
+    typeof URL.createObjectURL === 'function'
+  ) {
+    try {
+      return URL.createObjectURL(blob);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 
 /**
  * Local Demonstration Data Gateway (IndexedDB via Dexie.js).
  *
- * Enforces the same multi-institution data isolation, role-based access control,
- * campus scoping, last-administrator protection, and append-only audit logging
- * defined in `supabase/migrations/20261118000100_phase1_institutional_foundation.sql`.
+ * Mirrors the exact multi-institution isolation, RBAC rules, verification governance,
+ * composite same-institution constraints, soft archival, and append-only audit trail
+ * defined in the Phase 1 & Phase 2 Supabase PostgreSQL migrations.
  */
-export class LocalDemoDataGateway implements FoundationDataGateway {
+export class LocalDemoDataGateway implements BadoDataGateway {
   readonly mode = 'demo' as const;
   private readonly db: BadoLocalDatabase;
   private readonly listeners = new Set<() => void>();
@@ -62,7 +108,7 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
         window.localStorage.removeItem(DEMO_SESSION_STORAGE_KEY);
       }
     } catch {
-      // Storage unavailable (e.g. restricted browsing mode); rely on in-memory fallback.
+      // Fall back to in-memory tracking if localStorage is blocked.
     }
   }
 
@@ -72,7 +118,9 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
     }
   }
 
-  private async hydrateSessionForUser(userId: string): Promise<AuthSessionState | null> {
+  private async hydrateSessionForUser(
+    userId: string,
+  ): Promise<AuthSessionState | null> {
     await ensureDemoSeedData(this.db);
     const user = await this.db.profiles.get(userId);
     if (!user) return null;
@@ -85,7 +133,9 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
 
     const memberships: UserInstitutionMembership[] = [];
     for (const membership of rawMemberships) {
-      const institution = await this.db.institutions.get(membership.institutionId);
+      const institution = await this.db.institutions.get(
+        membership.institutionId,
+      );
       if (!institution || !institution.isActive) continue;
       const department = membership.departmentId
         ? ((await this.db.departments.get(membership.departmentId)) ?? null)
@@ -107,7 +157,10 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
 
   private async requireMembership(
     institutionId: string,
-  ): Promise<{ session: AuthSessionState; membership: UserInstitutionMembership }> {
+  ): Promise<{
+    session: AuthSessionState;
+    membership: UserInstitutionMembership;
+  }> {
     const session = await this.getSession();
     if (!session) {
       throw new Error('UNAUTHENTICATED: Please sign in to access BADO.');
@@ -121,6 +174,28 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
       );
     }
     return { session, membership };
+  }
+
+  private isAssetVisibleToMember(
+    asset: AssetRecord,
+    membership: UserInstitutionMembership,
+    userId: string,
+  ): boolean {
+    if (asset.archivedAt !== null) return false;
+    if (asset.institutionId !== membership.institutionId) return false;
+    if (!canAccessCampus(membership, asset.campusId)) return false;
+
+    // Match RLS policy `assets_select_permitted`: unsubmitted drafts are private to creator + managers
+    if (
+      asset.verificationStatus === 'draft' &&
+      asset.createdBy !== userId &&
+      membership.role !== 'admin' &&
+      membership.role !== 'supervisor'
+    ) {
+      return false;
+    }
+
+    return true;
   }
 
   private async writeAuditLog(params: {
@@ -152,6 +227,10 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
     await this.db.auditLogs.add(entry);
   }
 
+  // ---------------------------------------------------------------------------
+  // Authentication & Phase 1 Institutional Operations
+  // ---------------------------------------------------------------------------
+
   async getSession(): Promise<AuthSessionState | null> {
     await ensureDemoSeedData(this.db);
     const userId = this.getStoredUserId();
@@ -168,7 +247,9 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
   async signInAsDemoUser(userId: string): Promise<AuthSessionState> {
     const session = await this.hydrateSessionForUser(userId);
     if (!session || session.memberships.length === 0) {
-      throw new Error('Selected demonstration account was not found or is inactive.');
+      throw new Error(
+        'Selected demonstration account was not found or is inactive.',
+      );
     }
     this.setStoredUserId(userId);
     this.notifyAuthChange();
@@ -213,11 +294,19 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
       .toArray();
 
     const sorted = rows.sort((a, b) => a.name.localeCompare(b.name));
-    await recordCacheSync(institutionId, null, 'departments', sorted.length, this.db);
+    await recordCacheSync(
+      institutionId,
+      null,
+      'departments',
+      sorted.length,
+      this.db,
+    );
     return sorted;
   }
 
-  async getInstitutionSettings(institutionId: string): Promise<InstitutionSettings> {
+  async getInstitutionSettings(
+    institutionId: string,
+  ): Promise<InstitutionSettings> {
     const { membership } = await this.requireMembership(institutionId);
     assertPermission(membership, institutionId, 'infrastructure:view');
 
@@ -275,6 +364,7 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
     institutionId: string,
     campusId: string | null,
   ): Promise<DashboardSummary> {
+    const { session, membership } = await this.requireMembership(institutionId);
     const campuses = await this.listCampuses(institutionId);
     if (campusId && !campuses.some((c) => c.id === campusId)) {
       throw new Error(
@@ -283,16 +373,47 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
     }
     const departments = await this.listDepartments(institutionId);
 
-    // Phase 1 counts reflect real stored records (0 assets until Phase 2 asset registry is added).
+    const allInstAssets = await this.db.assets
+      .where('institutionId')
+      .equals(institutionId)
+      .toArray();
+
+    const scopedAssets = allInstAssets.filter(
+      (asset) =>
+        this.isAssetVisibleToMember(asset, membership, session.user.id) &&
+        (!campusId || asset.campusId === campusId),
+    );
+
+    let surfaceAssets = 0;
+    let undergroundAssets = 0;
+    let linearRoutes = 0;
+    let surveyBenchmarks = 0;
+    let pendingVerification = 0;
+
+    for (const asset of scopedAssets) {
+      if (asset.category === 'surface') surfaceAssets += 1;
+      if (asset.category === 'underground') undergroundAssets += 1;
+      if (asset.category === 'survey_reference') surveyBenchmarks += 1;
+      if (
+        asset.geometry.type === 'LineString' ||
+        asset.geometry.type === 'MultiLineString'
+      ) {
+        linearRoutes += 1;
+      }
+      if (isPendingVerification(asset.verificationStatus)) {
+        pendingVerification += 1;
+      }
+    }
+
     return {
       institutionId,
       campusId,
-      totalAssets: 0,
-      surfaceAssets: 0,
-      undergroundAssets: 0,
-      linearRoutes: 0,
-      surveyBenchmarks: 0,
-      pendingVerification: 0,
+      totalAssets: scopedAssets.length,
+      surfaceAssets,
+      undergroundAssets,
+      linearRoutes,
+      surveyBenchmarks,
+      pendingVerification,
       campusCount: campuses.length,
       departmentCount: departments.length,
       recentMaintenanceCount: 0,
@@ -308,8 +429,10 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
 
     const input = createCampusSchema.parse(rawInput);
 
-    const hasLat = typeof input.centerLat === 'number' && !Number.isNaN(input.centerLat);
-    const hasLng = typeof input.centerLng === 'number' && !Number.isNaN(input.centerLng);
+    const hasLat =
+      typeof input.centerLat === 'number' && !Number.isNaN(input.centerLat);
+    const hasLng =
+      typeof input.centerLng === 'number' && !Number.isNaN(input.centerLng);
     if (hasLat !== hasLng) {
       throw new Error(
         'Provide both latitude and longitude for campus centre coordinates, or leave both blank.',
@@ -505,12 +628,9 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
 
     const target = await this.db.userInstitutions.get(membershipId);
     if (!target || target.institutionId !== institutionId) {
-      throw new Error(
-        'Target membership not found in the active institution.',
-      );
+      throw new Error('Target membership not found in the active institution.');
     }
 
-    // Mirror PostgreSQL trigger `protect_last_institution_admin()`
     if (
       target.role === 'admin' &&
       target.isActive &&
@@ -555,5 +675,1027 @@ export class LocalDemoDataGateway implements FoundationDataGateway {
     }
 
     return updated;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 — Core Asset Registry, Benchmarks, Media & Verification Workflow
+  // ---------------------------------------------------------------------------
+
+  async listAssetTypes(
+    institutionId: string,
+    category?: AssetCategory,
+  ): Promise<AssetTypeDefinition[]> {
+    const { membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'infrastructure:view');
+
+    const rows = await this.db.assetTypes
+      .where('institutionId')
+      .equals(institutionId)
+      .filter((t) => t.isActive && (!category || t.category === category))
+      .toArray();
+
+    const sorted = rows.sort((a, b) => a.name.localeCompare(b.name));
+    await recordCacheSync(
+      institutionId,
+      null,
+      'asset_types',
+      sorted.length,
+      this.db,
+    );
+    return sorted;
+  }
+
+  async listBenchmarkReferences(
+    institutionId: string,
+    campusId?: string | null,
+  ): Promise<BenchmarkReferenceOption[]> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'infrastructure:view');
+
+    const benchmarks = await this.db.surveyBenchmarks
+      .where('institutionId')
+      .equals(institutionId)
+      .toArray();
+
+    const results: BenchmarkReferenceOption[] = [];
+    for (const bm of benchmarks) {
+      const asset = await this.db.assets.get(bm.assetId);
+      if (!asset) continue;
+      if (!this.isAssetVisibleToMember(asset, membership, session.user.id)) {
+        continue;
+      }
+      if (campusId && asset.campusId !== campusId) continue;
+
+      results.push({
+        assetId: asset.id,
+        campusId: asset.campusId,
+        name: asset.name,
+        referenceCode: bm.referenceCode,
+        elevationM: bm.elevationM,
+        verticalDatum: bm.verticalDatum,
+      });
+    }
+
+    return results.sort((a, b) => a.referenceCode.localeCompare(b.referenceCode));
+  }
+
+  async listAssets(
+    institutionId: string,
+    filters: AssetListFilters = {},
+  ): Promise<AssetListItem[]> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'infrastructure:view');
+
+    if (filters.campusId && !canAccessCampus(membership, filters.campusId)) {
+      throw new Error(
+        'ACCESS DENIED: Requested campus does not belong to your permitted campuses.',
+      );
+    }
+
+    const [
+      allAssets,
+      allTypes,
+      allCampuses,
+      allDepartments,
+      allBenchmarks,
+      allPhotos,
+      allDocuments,
+    ] = await Promise.all([
+      this.db.assets.where('institutionId').equals(institutionId).toArray(),
+      this.db.assetTypes.where('institutionId').equals(institutionId).toArray(),
+      this.db.campuses.where('institutionId').equals(institutionId).toArray(),
+      this.db.departments.where('institutionId').equals(institutionId).toArray(),
+      this.db.surveyBenchmarks
+        .where('institutionId')
+        .equals(institutionId)
+        .toArray(),
+      this.db.assetPhotos.where('institutionId').equals(institutionId).toArray(),
+      this.db.assetDocuments
+        .where('institutionId')
+        .equals(institutionId)
+        .toArray(),
+    ]);
+
+    const typeById = new Map(allTypes.map((t) => [t.id, t]));
+    const campusById = new Map(allCampuses.map((c) => [c.id, c]));
+    const deptById = new Map(allDepartments.map((d) => [d.id, d]));
+    const benchmarkByAssetId = new Map(allBenchmarks.map((b) => [b.assetId, b]));
+
+    const photoCountByAsset = new Map<string, number>();
+    for (const photo of allPhotos) {
+      photoCountByAsset.set(
+        photo.assetId,
+        (photoCountByAsset.get(photo.assetId) ?? 0) + 1,
+      );
+    }
+
+    const docCountByAsset = new Map<string, number>();
+    for (const doc of allDocuments) {
+      docCountByAsset.set(
+        doc.assetId,
+        (docCountByAsset.get(doc.assetId) ?? 0) + 1,
+      );
+    }
+
+    const searchNeedle = (filters.search ?? '').trim().toLowerCase();
+
+    const filtered: AssetListItem[] = [];
+    for (const asset of allAssets) {
+      if (!this.isAssetVisibleToMember(asset, membership, session.user.id)) {
+        continue;
+      }
+      if (filters.campusId && asset.campusId !== filters.campusId) continue;
+      if (
+        filters.category &&
+        filters.category !== 'all' &&
+        asset.category !== filters.category
+      ) {
+        continue;
+      }
+      if (
+        filters.assetTypeId &&
+        filters.assetTypeId !== 'all' &&
+        asset.assetTypeId !== filters.assetTypeId
+      ) {
+        continue;
+      }
+      if (
+        filters.utilityGroup &&
+        filters.utilityGroup !== 'all' &&
+        asset.utilityGroup !== filters.utilityGroup
+      ) {
+        continue;
+      }
+      if (filters.verificationStatus && filters.verificationStatus !== 'all') {
+        if (filters.verificationStatus === 'pending_review') {
+          if (!isPendingVerification(asset.verificationStatus)) continue;
+        } else if (asset.verificationStatus !== filters.verificationStatus) {
+          continue;
+        }
+      }
+
+      const assetType = typeById.get(asset.assetTypeId);
+      if (!assetType) continue;
+      const benchmark = benchmarkByAssetId.get(asset.id) ?? null;
+      const campus = campusById.get(asset.campusId) ?? null;
+      const department = asset.departmentId
+        ? (deptById.get(asset.departmentId) ?? null)
+        : null;
+
+      if (searchNeedle) {
+        const haystack = [
+          asset.assetCode,
+          asset.name,
+          asset.description ?? '',
+          asset.locationReferenceText ?? '',
+          asset.material ?? '',
+          assetType.name,
+          campus?.name ?? '',
+          department?.name ?? '',
+          benchmark?.referenceCode ?? '',
+          benchmark?.monumentType ?? '',
+          benchmark?.surveyorName ?? '',
+        ]
+          .join(' ')
+          .toLowerCase();
+
+        if (!haystack.includes(searchNeedle)) continue;
+      }
+
+      filtered.push({
+        asset,
+        assetType,
+        campus,
+        department,
+        benchmark,
+        photoCount: photoCountByAsset.get(asset.id) ?? 0,
+        documentCount: docCountByAsset.get(asset.id) ?? 0,
+      });
+    }
+
+    filtered.sort((a, b) => b.asset.updatedAt.localeCompare(a.asset.updatedAt));
+    await recordCacheSync(
+      institutionId,
+      filters.campusId ?? null,
+      'assets',
+      filtered.length,
+      this.db,
+    );
+    return filtered;
+  }
+
+  async getAssetDetail(
+    institutionId: string,
+    assetId: string,
+  ): Promise<AssetDetailBundle> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'infrastructure:view');
+
+    const asset = await this.db.assets.get(assetId);
+    if (
+      !asset ||
+      !this.isAssetVisibleToMember(asset, membership, session.user.id)
+    ) {
+      throw new Error('Asset record not found or outside your permitted scope.');
+    }
+
+    const [
+      assetType,
+      campus,
+      department,
+      benchmark,
+      registeredByProfile,
+      verifiedByProfile,
+      rawPhotos,
+      rawDocuments,
+      observations,
+      history,
+    ] = await Promise.all([
+      this.db.assetTypes.get(asset.assetTypeId),
+      this.db.campuses.get(asset.campusId),
+      asset.departmentId
+        ? this.db.departments.get(asset.departmentId)
+        : Promise.resolve(undefined),
+      this.db.surveyBenchmarks.get(asset.id),
+      asset.createdBy
+        ? this.db.profiles.get(asset.createdBy)
+        : Promise.resolve(undefined),
+      asset.lastVerifiedBy
+        ? this.db.profiles.get(asset.lastVerifiedBy)
+        : Promise.resolve(undefined),
+      this.db.assetPhotos
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+      this.db.assetDocuments
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+      this.db.assetObservations
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+      this.db.verificationHistory
+        .where('[institutionId+assetId]')
+        .equals([institutionId, asset.id])
+        .toArray(),
+    ]);
+
+    if (!assetType) {
+      throw new Error('Associated asset type definition was not found.');
+    }
+
+    let referenceBenchmark: AssetDetailBundle['referenceBenchmark'] = null;
+    if (asset.referenceBenchmarkId) {
+      const [refAsset, refBm] = await Promise.all([
+        this.db.assets.get(asset.referenceBenchmarkId),
+        this.db.surveyBenchmarks.get(asset.referenceBenchmarkId),
+      ]);
+      if (refAsset && refBm && refAsset.institutionId === institutionId) {
+        referenceBenchmark = {
+          assetId: refAsset.id,
+          name: refAsset.name,
+          referenceCode: refBm.referenceCode,
+          elevationM: refBm.elevationM,
+          verticalDatum: refBm.verticalDatum,
+        };
+      }
+    }
+
+    const photos: AssetPhotoRecord[] = [];
+    for (const photo of rawPhotos.sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    )) {
+      let previewUrl = photo.previewUrl ?? null;
+      if (!previewUrl && photo.localBlobId) {
+        const blobRec = await this.db.localMediaBlobs.get(photo.localBlobId);
+        if (blobRec) {
+          previewUrl = buildBlobObjectUrl(blobRec.blob);
+        }
+      }
+      photos.push({ ...photo, previewUrl });
+    }
+
+    const documents: AssetDocumentRecord[] = [];
+    for (const doc of rawDocuments.sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    )) {
+      let downloadUrl = doc.downloadUrl ?? null;
+      if (!downloadUrl && doc.localBlobId) {
+        const blobRec = await this.db.localMediaBlobs.get(doc.localBlobId);
+        if (blobRec) {
+          downloadUrl = buildBlobObjectUrl(blobRec.blob);
+        }
+      }
+      documents.push({ ...doc, downloadUrl });
+    }
+
+    return {
+      asset,
+      assetType,
+      campus: campus ?? null,
+      department: department ?? null,
+      benchmark: benchmark ?? null,
+      photoCount: photos.length,
+      documentCount: documents.length,
+      registeredByName: registeredByProfile?.fullName ?? null,
+      lastVerifiedByName: verifiedByProfile?.fullName ?? null,
+      referenceBenchmark,
+      photos,
+      documents,
+      observations: observations.sort((a, b) =>
+        b.measuredAt.localeCompare(a.measuredAt),
+      ),
+      verificationHistory: history.sort((a, b) =>
+        b.createdAt.localeCompare(a.createdAt),
+      ),
+    };
+  }
+
+  async createAsset(
+    institutionId: string,
+    rawInput: CreateAssetInput,
+  ): Promise<AssetRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'assets:create');
+
+    const input = createAssetInputSchema.parse(rawInput);
+
+    if (input.category === 'survey_reference') {
+      assertPermission(membership, institutionId, 'benchmarks:manage');
+    }
+
+    // Same-institution campus & access validation
+    const campus = await this.db.campuses.get(input.campusId);
+    if (!campus || campus.institutionId !== institutionId || !campus.isActive) {
+      throw new Error('Selected campus does not belong to the active institution.');
+    }
+    if (!canAccessCampus(membership, campus.id)) {
+      throw new Error(
+        'ACCESS DENIED: You are not permitted to register assets on this campus.',
+      );
+    }
+
+    // Same-institution department validation
+    if (input.departmentId) {
+      const dept = await this.db.departments.get(input.departmentId);
+      if (!dept || dept.institutionId !== institutionId) {
+        throw new Error(
+          'Selected department does not belong to the active institution.',
+        );
+      }
+    }
+
+    // Same-institution asset type validation + category alignment
+    const assetType = await this.db.assetTypes.get(input.assetTypeId);
+    if (!assetType || assetType.institutionId !== institutionId) {
+      throw new Error(
+        'Selected asset type does not belong to the active institution.',
+      );
+    }
+    if (assetType.category !== input.category) {
+      throw new Error(
+        `Asset type "${assetType.name}" belongs to category "${assetType.category}", not "${input.category}".`,
+      );
+    }
+
+    // Validate dynamic type-specific fields against assetType.fieldSchema
+    const cleanedAttributes = validateDynamicAttributes(
+      assetType,
+      input.customAttributes,
+      input.submissionMode,
+    );
+
+    // Idempotent check for offline replay using the same asset UUID
+    if (input.id) {
+      const existingById = await this.db.assets.get(input.id);
+      if (existingById && existingById.institutionId === institutionId) {
+        return existingById;
+      }
+    }
+
+    // Check duplicate asset code within institution
+    const duplicateCode = await this.db.assets
+      .where('[institutionId+assetCode]')
+      .equals([institutionId, input.assetCode])
+      .first();
+    if (duplicateCode) {
+      throw new Error(
+        `An asset with ID "${input.assetCode}" already exists in this institution.`,
+      );
+    }
+
+    // Check duplicate benchmark reference code within institution
+    if (input.category === 'survey_reference' && input.benchmark) {
+      const duplicateBm = await this.db.surveyBenchmarks
+        .where('[institutionId+referenceCode]')
+        .equals([institutionId, input.benchmark.referenceCode])
+        .first();
+      if (duplicateBm) {
+        throw new Error(
+          `A survey benchmark with Reference ID "${input.benchmark.referenceCode}" already exists in this institution.`,
+        );
+      }
+    }
+
+    // Validate optional benchmark reference belongs to same institution
+    if (input.referenceBenchmarkId) {
+      const refBm = await this.db.surveyBenchmarks.get(input.referenceBenchmarkId);
+      if (!refBm || refBm.institutionId !== institutionId) {
+        throw new Error(
+          'Selected reference benchmark does not belong to this institution.',
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
+    const capturedAt = input.capturedAt ?? now;
+    const measuredAt = input.measuredAt ?? capturedAt;
+    const isOfflineCapture =
+      Boolean(input.saveOffline) ||
+      (typeof navigator !== 'undefined' && !navigator.onLine);
+
+    const dataQuality: DataQuality =
+      input.submissionMode === 'draft' ? 'incomplete' : 'unverified';
+
+    const asset: AssetRecord = {
+      id: input.id ?? crypto.randomUUID(),
+      institutionId,
+      campusId: input.campusId,
+      departmentId: input.departmentId ?? null,
+      assetTypeId: assetType.id,
+      assetCode: input.assetCode,
+      name: input.name,
+      category: assetType.category,
+      utilityGroup: input.isCriticalHazard
+        ? 'critical_hazard'
+        : assetType.utilityGroup,
+      description: input.description ? input.description : null,
+      geometry: {
+        type: 'Point',
+        coordinates: [input.longitude, input.latitude],
+      },
+      installationDate: input.installationDate ? input.installationDate : null,
+      operationalStatus: input.operationalStatus,
+      physicalCondition: input.physicalCondition,
+      // New records NEVER auto-verify (Master Spec Section 9)
+      verificationStatus: input.submissionMode,
+      dataQuality,
+      isCriticalHazard: input.isCriticalHazard || assetType.code === 'GAS_LINE',
+
+      material: input.material ? input.material : null,
+      diameterMm: input.diameterMm ?? null,
+      cableSpecification: input.cableSpecification
+        ? input.cableSpecification
+        : null,
+      recordedDepthM: input.recordedDepthM ?? null,
+      depthIsVariable: input.depthIsVariable,
+      depthMeasurementMethod: input.depthMeasurementMethod ?? null,
+      documentedBeforeCovering: input.documentedBeforeCovering,
+      directionDescription: input.directionDescription
+        ? input.directionDescription
+        : null,
+      constructionRecordRef: input.constructionRecordRef
+        ? input.constructionRecordRef
+        : null,
+
+      customAttributes: cleanedAttributes,
+      referenceBenchmarkId: input.referenceBenchmarkId ?? null,
+      locationReferenceText: input.locationReferenceText
+        ? input.locationReferenceText
+        : null,
+      notes: input.notes ? input.notes : null,
+
+      positionSource: input.positionSource,
+      captureMethod: input.captureMethod,
+      receiverModel: input.receiverModel ? input.receiverModel : null,
+      horizontalAccuracyM: input.horizontalAccuracyM ?? null,
+      verticalAccuracyM: input.verticalAccuracyM ?? null,
+      fixQuality: input.fixQuality,
+      correctionSource: input.correctionSource ? input.correctionSource : null,
+      sourceCrs: input.sourceCrs,
+      measuredAt,
+      isManuallyAdjusted: input.isManuallyAdjusted,
+
+      capturedAt,
+      lastVerifiedAt: null,
+      lastVerifiedBy: null,
+      version: 1,
+      createdBy: session.user.id,
+      updatedBy: session.user.id,
+      archivedAt: null,
+      archivedBy: null,
+      createdAt: now,
+      updatedAt: now,
+      localSyncStatus: isOfflineCapture ? 'pending' : 'synced',
+    };
+
+    const benchmarkRecord: SurveyBenchmarkRecord | null =
+      input.category === 'survey_reference' && input.benchmark
+        ? {
+            assetId: asset.id,
+            institutionId,
+            referenceCode: input.benchmark.referenceCode,
+            monumentType: input.benchmark.monumentType,
+            elevationM: input.benchmark.elevationM ?? null,
+            verticalDatum: input.benchmark.verticalDatum,
+            horizontalCrs: input.benchmark.horizontalCrs,
+            surveyMethod: input.benchmark.surveyMethod,
+            horizontalAccuracyM:
+              input.benchmark.horizontalAccuracyM ??
+              input.horizontalAccuracyM ??
+              null,
+            verticalAccuracyM:
+              input.benchmark.verticalAccuracyM ?? input.verticalAccuracyM ?? null,
+            surveyDate: input.benchmark.surveyDate
+              ? input.benchmark.surveyDate
+              : null,
+            surveyorName: input.benchmark.surveyorName
+              ? input.benchmark.surveyorName
+              : session.user.fullName,
+            createdAt: now,
+            updatedAt: now,
+          }
+        : null;
+
+    const initialVerificationEvent: AssetVerificationEvent = {
+      id: crypto.randomUUID(),
+      institutionId,
+      assetId: asset.id,
+      fromStatus: null,
+      toStatus: asset.verificationStatus,
+      reviewerId: session.user.id,
+      reviewerName: session.user.fullName,
+      reviewerRole: membership.role,
+      remarks:
+        asset.verificationStatus === 'submitted'
+          ? 'Registered in the field and submitted for supervisor verification.'
+          : 'Saved as a field draft pending completion and submission.',
+      createdAt: now,
+    };
+
+    await this.db.transaction(
+      'rw',
+      [
+        this.db.assets,
+        this.db.surveyBenchmarks,
+        this.db.verificationHistory,
+        this.db.auditLogs,
+      ],
+      async () => {
+        await this.db.assets.add(asset);
+        if (benchmarkRecord) {
+          await this.db.surveyBenchmarks.add(benchmarkRecord);
+        }
+        await this.db.verificationHistory.add(initialVerificationEvent);
+        await this.writeAuditLog({
+          institutionId,
+          actorUserId: session.user.id,
+          actorName: session.user.fullName,
+          actorRole: membership.role,
+          action: 'insert',
+          entityType: 'assets',
+          entityId: asset.id,
+          summary: `Registered ${assetType.name} "${asset.name}" (${asset.assetCode}) as ${asset.verificationStatus}.`,
+          oldData: null,
+          newData: {
+            assetCode: asset.assetCode,
+            category: asset.category,
+            verificationStatus: asset.verificationStatus,
+            positionSource: asset.positionSource,
+            horizontalAccuracyM: asset.horizontalAccuracyM,
+          },
+        });
+      },
+    );
+
+    if (isOfflineCapture) {
+      await enqueueSyncOperation(
+        {
+          institutionId,
+          campusId: asset.campusId,
+          recordType: 'assets',
+          recordId: asset.id,
+          operationType: 'create',
+          payload: {
+            assetCode: asset.assetCode,
+            name: asset.name,
+            category: asset.category,
+            verificationStatus: asset.verificationStatus,
+          },
+          capturedAt,
+        },
+        this.db,
+      );
+    }
+
+    return asset;
+  }
+
+  async submitDraftAsset(
+    institutionId: string,
+    assetId: string,
+  ): Promise<AssetRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'assets:edit_own_draft');
+
+    const asset = await this.db.assets.get(assetId);
+    if (!asset || asset.institutionId !== institutionId || asset.archivedAt) {
+      throw new Error('Asset record not found.');
+    }
+
+    const isOwner = asset.createdBy === session.user.id;
+    const isManager =
+      membership.role === 'admin' || membership.role === 'supervisor';
+    if (!isOwner && !isManager) {
+      throw new Error(
+        'ACCESS DENIED: You can only submit your own draft or rejected asset records.',
+      );
+    }
+
+    if (
+      asset.verificationStatus !== 'draft' &&
+      asset.verificationStatus !== 'rejected' &&
+      asset.verificationStatus !== 'needs_resurvey'
+    ) {
+      throw new Error(
+        `Asset with status "${asset.verificationStatus}" cannot be re-submitted.`,
+      );
+    }
+
+    const assetType = await this.db.assetTypes.get(asset.assetTypeId);
+    if (assetType) {
+      validateDynamicAttributes(assetType, asset.customAttributes, 'submitted');
+    }
+
+    const now = new Date().toISOString();
+    const updated: AssetRecord = {
+      ...asset,
+      verificationStatus: 'submitted',
+      dataQuality: 'unverified',
+      updatedBy: session.user.id,
+      version: asset.version + 1,
+      updatedAt: now,
+    };
+
+    await this.db.assets.put(updated);
+    await this.db.verificationHistory.add({
+      id: crypto.randomUUID(),
+      institutionId,
+      assetId: asset.id,
+      fromStatus: asset.verificationStatus,
+      toStatus: 'submitted',
+      reviewerId: session.user.id,
+      reviewerName: session.user.fullName,
+      reviewerRole: membership.role,
+      remarks: 'Submitted asset record for supervisor verification.',
+      createdAt: now,
+    });
+
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'update',
+      entityType: 'assets',
+      entityId: asset.id,
+      summary: `Submitted asset "${asset.name}" (${asset.assetCode}) for review.`,
+      oldData: { verificationStatus: asset.verificationStatus },
+      newData: { verificationStatus: 'submitted' },
+    });
+
+    return updated;
+  }
+
+  async reviewAssetVerification(
+    institutionId: string,
+    rawInput: ReviewVerificationInput,
+  ): Promise<AssetRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    const input = reviewVerificationSchema.parse(rawInput);
+
+    // Mirror SQL trigger `enforce_asset_governance()`:
+    // - admin & supervisor: under_review, verified, rejected, needs_resurvey
+    // - surveyor_gis: spatial review only (under_review, needs_resurvey)
+    if (input.toStatus === 'verified' || input.toStatus === 'rejected') {
+      assertPermission(membership, institutionId, 'assets:verify');
+    } else if (
+      input.toStatus === 'under_review' ||
+      input.toStatus === 'needs_resurvey'
+    ) {
+      if (
+        membership.role !== 'admin' &&
+        membership.role !== 'supervisor' &&
+        membership.role !== 'surveyor_gis'
+      ) {
+        throw new Error(
+          'ACCESS DENIED: Only Administrators, Supervisors, and Surveyor/GIS Officers can change review state.',
+        );
+      }
+    } else {
+      throw new Error(
+        `Invalid verification review target status "${input.toStatus}".`,
+      );
+    }
+
+    const asset = await this.db.assets.get(input.assetId);
+    if (!asset || asset.institutionId !== institutionId || asset.archivedAt) {
+      throw new Error('Asset record not found in the active institution.');
+    }
+    if (!canAccessCampus(membership, asset.campusId)) {
+      throw new Error('ACCESS DENIED: Asset belongs to an unpermitted campus.');
+    }
+
+    const now = new Date().toISOString();
+    const dataQuality: DataQuality =
+      input.toStatus === 'verified'
+        ? 'verified'
+        : input.toStatus === 'needs_resurvey'
+          ? 'needs_resurvey'
+          : 'unverified';
+
+    const updated: AssetRecord = {
+      ...asset,
+      verificationStatus: input.toStatus,
+      dataQuality,
+      lastVerifiedAt:
+        input.toStatus === 'verified' ? now : asset.lastVerifiedAt,
+      lastVerifiedBy:
+        input.toStatus === 'verified' ? session.user.id : asset.lastVerifiedBy,
+      updatedBy: session.user.id,
+      version: asset.version + 1,
+      updatedAt: now,
+    };
+
+    const auditAction: AuditAction =
+      input.toStatus === 'verified'
+        ? 'approve'
+        : input.toStatus === 'rejected'
+          ? 'reject'
+          : 'update';
+
+    await this.db.transaction(
+      'rw',
+      [this.db.assets, this.db.verificationHistory, this.db.auditLogs],
+      async () => {
+        await this.db.assets.put(updated);
+        await this.db.verificationHistory.add({
+          id: crypto.randomUUID(),
+          institutionId,
+          assetId: asset.id,
+          fromStatus: asset.verificationStatus,
+          toStatus: input.toStatus,
+          reviewerId: session.user.id,
+          reviewerName: session.user.fullName,
+          reviewerRole: membership.role,
+          remarks:
+            input.remarks ||
+            `Verification status updated from ${asset.verificationStatus} to ${input.toStatus}.`,
+          createdAt: now,
+        });
+        await this.writeAuditLog({
+          institutionId,
+          actorUserId: session.user.id,
+          actorName: session.user.fullName,
+          actorRole: membership.role,
+          action: auditAction,
+          entityType: 'assets',
+          entityId: asset.id,
+          summary: `Marked asset "${asset.name}" (${asset.assetCode}) as ${input.toStatus}.`,
+          oldData: { verificationStatus: asset.verificationStatus },
+          newData: {
+            verificationStatus: input.toStatus,
+            remarks: input.remarks,
+          },
+        });
+      },
+    );
+
+    return updated;
+  }
+
+  async archiveAsset(
+    institutionId: string,
+    assetId: string,
+    reason: string,
+  ): Promise<void> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'assets:archive');
+
+    const cleanReason = reason.trim();
+    if (cleanReason.length < 4) {
+      throw new Error(
+        'Provide an archival reason (at least 4 characters) for the institutional audit log.',
+      );
+    }
+
+    const asset = await this.db.assets.get(assetId);
+    if (!asset || asset.institutionId !== institutionId || asset.archivedAt) {
+      throw new Error('Asset record not found or already archived.');
+    }
+
+    const now = new Date().toISOString();
+    await this.db.assets.put({
+      ...asset,
+      archivedAt: now,
+      archivedBy: session.user.id,
+      updatedBy: session.user.id,
+      version: asset.version + 1,
+      updatedAt: now,
+    });
+
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'archive',
+      entityType: 'assets',
+      entityId: asset.id,
+      summary: `Archived asset "${asset.name}" (${asset.assetCode}): ${cleanReason}`,
+      oldData: { archivedAt: null },
+      newData: { archivedAt: now, reason: cleanReason },
+    });
+  }
+
+  async uploadAssetPhoto(
+    institutionId: string,
+    input: UploadAssetPhotoInput,
+  ): Promise<AssetPhotoRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'assets:create');
+
+    const meta = uploadAssetPhotoMetaSchema.parse({
+      assetId: input.assetId,
+      photoKind: input.photoKind,
+      caption: input.caption,
+      capturedAt: input.capturedAt,
+    });
+
+    const asset = await this.db.assets.get(meta.assetId);
+    if (!asset || asset.institutionId !== institutionId || asset.archivedAt) {
+      throw new Error('Target asset not found in the active institution.');
+    }
+
+    const prepared = await preparePhotoForStorage(input.file);
+    const now = new Date().toISOString();
+    const photoId = crypto.randomUUID();
+    const blobId = crypto.randomUUID();
+    const storagePath = `${institutionId}/${asset.campusId}/${asset.id}/photos/${photoId}_${prepared.fileName}`;
+
+    await this.db.localMediaBlobs.add({
+      id: blobId,
+      institutionId,
+      assetId: asset.id,
+      mediaKind: 'photo',
+      fileName: prepared.fileName,
+      mimeType: prepared.mimeType,
+      blob: prepared.blob,
+      createdAt: now,
+    });
+
+    const record: AssetPhotoRecord = {
+      id: photoId,
+      institutionId,
+      assetId: asset.id,
+      observationId: null,
+      storagePath,
+      fileName: prepared.fileName,
+      mimeType: prepared.mimeType,
+      fileSizeBytes: prepared.fileSizeBytes,
+      widthPx: prepared.widthPx,
+      heightPx: prepared.heightPx,
+      photoKind: meta.photoKind,
+      caption: meta.caption ? meta.caption : null,
+      capturedAt: meta.capturedAt ?? now,
+      uploadedBy: session.user.id,
+      uploadedByName: session.user.fullName,
+      createdAt: now,
+      localBlobId: blobId,
+    };
+
+    await this.db.assetPhotos.add(record);
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'insert',
+      entityType: 'asset_photos',
+      entityId: photoId,
+      summary: `Attached ${meta.photoKind} photograph "${prepared.fileName}" to ${asset.assetCode}.`,
+      oldData: null,
+      newData: {
+        assetCode: asset.assetCode,
+        fileName: prepared.fileName,
+        fileSizeBytes: prepared.fileSizeBytes,
+      },
+    });
+
+    const isOffline =
+      Boolean(input.saveOffline) ||
+      (typeof navigator !== 'undefined' && !navigator.onLine);
+    if (isOffline) {
+      await enqueueSyncOperation(
+        {
+          institutionId,
+          campusId: asset.campusId,
+          recordType: 'asset_photos',
+          recordId: photoId,
+          operationType: 'upload_photo',
+          payload: {
+            assetId: asset.id,
+            localBlobId: blobId,
+            storagePath,
+            photoKind: meta.photoKind,
+          },
+          capturedAt: record.capturedAt,
+        },
+        this.db,
+      );
+    }
+
+    return {
+      ...record,
+      previewUrl: buildBlobObjectUrl(prepared.blob),
+    };
+  }
+
+  async uploadAssetDocument(
+    institutionId: string,
+    input: UploadAssetDocumentInput,
+  ): Promise<AssetDocumentRecord> {
+    const { session, membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'assets:create');
+
+    const meta = uploadAssetDocumentMetaSchema.parse({
+      assetId: input.assetId,
+      documentKind: input.documentKind,
+      title: input.title,
+      description: input.description,
+    });
+
+    const asset = await this.db.assets.get(meta.assetId);
+    if (!asset || asset.institutionId !== institutionId || asset.archivedAt) {
+      throw new Error('Target asset not found in the active institution.');
+    }
+
+    const validatedFile = validateDocumentFile(input.file);
+    const now = new Date().toISOString();
+    const docId = crypto.randomUUID();
+    const blobId = crypto.randomUUID();
+    const storagePath = `${institutionId}/${asset.campusId}/${asset.id}/docs/${docId}_${validatedFile.fileName}`;
+
+    await this.db.localMediaBlobs.add({
+      id: blobId,
+      institutionId,
+      assetId: asset.id,
+      mediaKind: 'document',
+      fileName: validatedFile.fileName,
+      mimeType: validatedFile.mimeType,
+      blob: validatedFile.blob,
+      createdAt: now,
+    });
+
+    const record: AssetDocumentRecord = {
+      id: docId,
+      institutionId,
+      assetId: asset.id,
+      storagePath,
+      fileName: validatedFile.fileName,
+      mimeType: validatedFile.mimeType,
+      fileSizeBytes: validatedFile.fileSizeBytes,
+      documentKind: meta.documentKind,
+      title: meta.title,
+      description: meta.description ? meta.description : null,
+      uploadedBy: session.user.id,
+      uploadedByName: session.user.fullName,
+      createdAt: now,
+      localBlobId: blobId,
+    };
+
+    await this.db.assetDocuments.add(record);
+    await this.writeAuditLog({
+      institutionId,
+      actorUserId: session.user.id,
+      actorName: session.user.fullName,
+      actorRole: membership.role,
+      action: 'insert',
+      entityType: 'asset_documents',
+      entityId: docId,
+      summary: `Attached document "${meta.title}" (${validatedFile.fileName}) to ${asset.assetCode}.`,
+      oldData: null,
+      newData: {
+        assetCode: asset.assetCode,
+        title: meta.title,
+        mimeType: validatedFile.mimeType,
+      },
+    });
+
+    return {
+      ...record,
+      downloadUrl: buildBlobObjectUrl(validatedFile.blob),
+    };
   }
 }

@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import type {
+  CreateAssetInput,
+  ReviewVerificationInput,
+} from '@/lib/assets/validation';
 import {
   institutionThresholdsSchema,
   legendEntrySchema,
@@ -6,13 +10,23 @@ import {
 import {
   APP_ROLES,
   type AppRole,
+  type AssetCategory,
+  type AssetDetailBundle,
+  type AssetDocumentRecord,
+  type AssetListFilters,
+  type AssetListItem,
+  type AssetPhotoRecord,
+  type AssetRecord,
+  type AssetTypeDefinition,
   type AuditLogEntry,
   type AuthSessionState,
   type Campus,
   type DashboardSummary,
   type Department,
+  type DocumentKind,
   type InstitutionSettings,
   type LegendEntry,
+  type PhotoKind,
   type UserInstitutionMembership,
 } from '@/types/domain';
 
@@ -98,12 +112,38 @@ export const updateSettingsSchema = institutionThresholdsSchema.extend({
 
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
+export interface UploadAssetPhotoInput {
+  assetId: string;
+  file: File;
+  photoKind: PhotoKind;
+  caption?: string;
+  capturedAt?: string;
+  saveOffline?: boolean;
+}
+
+export interface UploadAssetDocumentInput {
+  assetId: string;
+  file: File;
+  documentKind: DocumentKind;
+  title: string;
+  description?: string;
+}
+
+export interface BenchmarkReferenceOption {
+  assetId: string;
+  campusId: string;
+  name: string;
+  referenceCode: string;
+  elevationM: number | null;
+  verticalDatum: string;
+}
+
 /**
- * Unified Data Gateway for BADO Phase 1 Foundation.
- * Implemented by both `SupabaseDataGateway` (production PostgreSQL + PostGIS + RLS)
+ * Unified Data Gateway for BADO (Phases 1–2: Institutional Foundation + Core Asset Management).
+ * Implemented by both `SupabaseDataGateway` (production PostgreSQL + PostGIS + Storage + RLS)
  * and `LocalDemoDataGateway` (clearly labelled IndexedDB simulation sandbox).
  */
-export interface FoundationDataGateway {
+export interface BadoDataGateway {
   readonly mode: 'supabase' | 'demo';
 
   // Authentication & session
@@ -113,7 +153,7 @@ export interface FoundationDataGateway {
   signOut(): Promise<void>;
   onAuthStateChange(listener: () => void): () => void;
 
-  // Institutional reads (isolated by institutionId + active membership)
+  // Institutional reads
   listCampuses(institutionId: string): Promise<Campus[]>;
   listDepartments(institutionId: string): Promise<Department[]>;
   getInstitutionSettings(institutionId: string): Promise<InstitutionSettings>;
@@ -144,4 +184,50 @@ export interface FoundationDataGateway {
     role: AppRole,
     isActive: boolean,
   ): Promise<UserInstitutionMembership>;
+
+  // Phase 2 — Core Asset Registry, Verification & Media
+  listAssetTypes(
+    institutionId: string,
+    category?: AssetCategory,
+  ): Promise<AssetTypeDefinition[]>;
+  listBenchmarkReferences(
+    institutionId: string,
+    campusId?: string | null,
+  ): Promise<BenchmarkReferenceOption[]>;
+  listAssets(
+    institutionId: string,
+    filters?: AssetListFilters,
+  ): Promise<AssetListItem[]>;
+  getAssetDetail(
+    institutionId: string,
+    assetId: string,
+  ): Promise<AssetDetailBundle>;
+  createAsset(
+    institutionId: string,
+    input: CreateAssetInput,
+  ): Promise<AssetRecord>;
+  submitDraftAsset(
+    institutionId: string,
+    assetId: string,
+  ): Promise<AssetRecord>;
+  reviewAssetVerification(
+    institutionId: string,
+    input: ReviewVerificationInput,
+  ): Promise<AssetRecord>;
+  archiveAsset(
+    institutionId: string,
+    assetId: string,
+    reason: string,
+  ): Promise<void>;
+  uploadAssetPhoto(
+    institutionId: string,
+    input: UploadAssetPhotoInput,
+  ): Promise<AssetPhotoRecord>;
+  uploadAssetDocument(
+    institutionId: string,
+    input: UploadAssetDocumentInput,
+  ): Promise<AssetDocumentRecord>;
 }
+
+/** Backwards-compatible alias for Phase 1 consumers. */
+export type FoundationDataGateway = BadoDataGateway;
