@@ -108,36 +108,42 @@ export function DashboardPage() {
       value: summary?.totalAssets ?? 0,
       icon: Database,
       tone: 'text-bado-navy-800 bg-bado-navy-50',
+      to: '/assets',
     },
     {
       label: 'Surface Assets',
       value: summary?.surfaceAssets ?? 0,
       icon: Building2,
       tone: 'text-emerald-700 bg-emerald-50',
+      to: '/assets?category=surface',
     },
     {
       label: 'Underground Assets',
       value: summary?.undergroundAssets ?? 0,
       icon: Layers,
       tone: 'text-blue-700 bg-blue-50',
+      to: '/assets?category=underground',
     },
     {
       label: 'Linear Routes',
       value: summary?.linearRoutes ?? 0,
       icon: Route,
       tone: 'text-purple-700 bg-purple-50',
+      to: '/assets?category=underground',
     },
     {
       label: 'Survey Benchmarks',
       value: summary?.surveyBenchmarks ?? 0,
       icon: Crosshair,
       tone: 'text-cyan-700 bg-cyan-50',
+      to: '/assets?category=survey_reference',
     },
     {
       label: 'Pending Verification',
       value: summary?.pendingVerification ?? 0,
       icon: ClipboardList,
       tone: 'text-amber-800 bg-amber-50',
+      to: '/assets?verification=pending_review',
     },
   ];
 
@@ -259,9 +265,10 @@ export function DashboardPage() {
           {stats.map((stat) => {
             const Icon = stat.icon;
             return (
-              <div
+              <Link
                 key={stat.label}
-                className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs"
+                to={stat.to}
+                className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs transition-colors hover:border-bado-navy-600 hover:bg-slate-50/50"
               >
                 <div
                   className={`inline-flex h-8 w-8 items-center justify-center rounded-lg ${stat.tone}`}
@@ -274,7 +281,7 @@ export function DashboardPage() {
                 <p className="mt-0.5 text-xs font-medium text-slate-600">
                   {stat.label}
                 </p>
-              </div>
+              </Link>
             );
           })}
         </div>

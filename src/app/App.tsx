@@ -9,6 +9,21 @@ import { DashboardPage } from '@/features/dashboard/DashboardPage';
 import { PlannedModulePage } from '@/features/shared/PlannedModulePage';
 import type { FoundationDataGateway } from '@/lib/data';
 
+const AssetListPage = lazy(() =>
+  import('@/features/assets/AssetListPage').then((m) => ({
+    default: m.AssetListPage,
+  })),
+);
+const AssetRegistrationPage = lazy(() =>
+  import('@/features/assets/AssetRegistrationPage').then((m) => ({
+    default: m.AssetRegistrationPage,
+  })),
+);
+const AssetDetailPage = lazy(() =>
+  import('@/features/assets/AssetDetailPage').then((m) => ({
+    default: m.AssetDetailPage,
+  })),
+);
 const AdminPage = lazy(() =>
   import('@/features/admin/AdminPage').then((m) => ({ default: m.AdminPage })),
 );
@@ -44,16 +59,9 @@ export function AppRoutes() {
           path="assets"
           element={
             <ProtectedRoute requiredPermission="infrastructure:view">
-              <PlannedModulePage
-                title="Institutional Asset Registry"
-                phaseLabel="Phase 2"
-                summary="Centralised register of surface facilities, underground utilities, and survey control benchmarks."
-                plannedCapabilities={[
-                  'Searchable, campus-scoped asset inventory with verification and data-quality badges.',
-                  'Detailed asset views with GNSS accuracy metadata, photographs, documents, and approval history.',
-                  'Supervisor review workflow (Draft, Submitted, Under Review, Verified, Rejected, Needs Re-survey).',
-                ]}
-              />
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <AssetListPage />
+              </Suspense>
             </ProtectedRoute>
           }
         />
@@ -62,16 +70,20 @@ export function AppRoutes() {
           path="assets/new"
           element={
             <ProtectedRoute requiredPermission="assets:create">
-              <PlannedModulePage
-                title="Log New Asset"
-                phaseLabel="Phase 2"
-                summary="Dynamic registration workflow for surface assets, underground infrastructure, and survey benchmarks."
-                plannedCapabilities={[
-                  'Category- and type-aware forms validated with Zod (boreholes, transformers, valves, cables, benchmarks).',
-                  'Smartphone GPS & GNSS-ready metadata capture plus map pin placement/adjustment.',
-                  'Compressed offline-ready photo attachments, burial depth entries, and benchmark references.',
-                ]}
-              />
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <AssetRegistrationPage />
+              </Suspense>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="assets/:assetId"
+          element={
+            <ProtectedRoute requiredPermission="infrastructure:view">
+              <Suspense fallback={<RouteLoadingFallback />}>
+                <AssetDetailPage />
+              </Suspense>
             </ProtectedRoute>
           }
         />

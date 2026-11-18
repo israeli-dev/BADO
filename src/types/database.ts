@@ -1,8 +1,27 @@
-import type { AppRole, AuditAction, LegendEntry } from './domain';
+import type {
+  AllowedGeometryType,
+  AppRole,
+  AssetCategory,
+  AuditAction,
+  CaptureMethod,
+  CustomAttributeValue,
+  DataQuality,
+  DepthMeasurementMethod,
+  DocumentKind,
+  DynamicFieldDefinition,
+  GnssFixQuality,
+  LegendEntry,
+  LegendLineStyle,
+  OperationalStatus,
+  PhotoKind,
+  PhysicalCondition,
+  PositionSource,
+  UtilityGroup,
+  VerificationStatus,
+} from './domain';
 
 /**
- * Typed Supabase schema contract matching `supabase/migrations/20261118000100_phase1_institutional_foundation.sql`.
- * Expanded progressively in later migrations (assets, routes, passports, etc.).
+ * Typed Supabase schema contract matching Phase 1 & Phase 2 migrations.
  */
 export type Json =
   | string
@@ -217,6 +236,357 @@ export interface Database {
         };
         Relationships: [];
       };
+      asset_types: {
+        Row: {
+          id: string;
+          institution_id: string;
+          category: AssetCategory;
+          utility_group: UtilityGroup;
+          code: string;
+          name: string;
+          description: string | null;
+          default_code_prefix: string;
+          allowed_geom_types: AllowedGeometryType[];
+          color_hex: string;
+          icon_key: string;
+          line_style: LegendLineStyle;
+          field_schema: DynamicFieldDefinition[];
+          supports_passport: boolean;
+          is_active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          category: AssetCategory;
+          utility_group: UtilityGroup;
+          code: string;
+          name: string;
+          description?: string | null;
+          default_code_prefix?: string;
+          allowed_geom_types?: AllowedGeometryType[];
+          color_hex: string;
+          icon_key: string;
+          line_style?: LegendLineStyle;
+          field_schema?: DynamicFieldDefinition[];
+          supports_passport?: boolean;
+          is_active?: boolean;
+        };
+        Update: {
+          name?: string;
+          description?: string | null;
+          color_hex?: string;
+          icon_key?: string;
+          line_style?: LegendLineStyle;
+          field_schema?: DynamicFieldDefinition[];
+          is_active?: boolean;
+        };
+        Relationships: [];
+      };
+      assets: {
+        Row: {
+          id: string;
+          institution_id: string;
+          campus_id: string;
+          department_id: string | null;
+          asset_type_id: string;
+          asset_code: string;
+          name: string;
+          category: AssetCategory;
+          utility_group: UtilityGroup;
+          description: string | null;
+          geom: unknown;
+          installation_date: string | null;
+          operational_status: OperationalStatus;
+          physical_condition: PhysicalCondition;
+          verification_status: VerificationStatus;
+          data_quality: DataQuality;
+          is_critical_hazard: boolean;
+          material: string | null;
+          diameter_mm: number | null;
+          cable_specification: string | null;
+          recorded_depth_m: number | null;
+          depth_is_variable: boolean;
+          depth_measurement_method: DepthMeasurementMethod | null;
+          documented_before_covering: boolean;
+          direction_description: string | null;
+          construction_record_ref: string | null;
+          custom_attributes: Record<string, CustomAttributeValue>;
+          reference_benchmark_id: string | null;
+          location_reference_text: string | null;
+          notes: string | null;
+          position_source: PositionSource;
+          capture_method: CaptureMethod;
+          receiver_model: string | null;
+          horizontal_accuracy_m: number | null;
+          vertical_accuracy_m: number | null;
+          fix_quality: GnssFixQuality;
+          correction_source: string | null;
+          source_crs: string;
+          measured_at: string;
+          is_manually_adjusted: boolean;
+          captured_at: string;
+          last_verified_at: string | null;
+          last_verified_by: string | null;
+          version: number;
+          created_by: string | null;
+          updated_by: string | null;
+          archived_at: string | null;
+          archived_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          campus_id: string;
+          department_id?: string | null;
+          asset_type_id: string;
+          asset_code: string;
+          name: string;
+          category: AssetCategory;
+          utility_group: UtilityGroup;
+          description?: string | null;
+          geom: unknown;
+          installation_date?: string | null;
+          operational_status?: OperationalStatus;
+          physical_condition?: PhysicalCondition;
+          verification_status?: VerificationStatus;
+          data_quality?: DataQuality;
+          is_critical_hazard?: boolean;
+          material?: string | null;
+          diameter_mm?: number | null;
+          cable_specification?: string | null;
+          recorded_depth_m?: number | null;
+          depth_is_variable?: boolean;
+          depth_measurement_method?: DepthMeasurementMethod | null;
+          documented_before_covering?: boolean;
+          direction_description?: string | null;
+          construction_record_ref?: string | null;
+          custom_attributes?: Record<string, CustomAttributeValue>;
+          reference_benchmark_id?: string | null;
+          location_reference_text?: string | null;
+          notes?: string | null;
+          position_source?: PositionSource;
+          capture_method?: CaptureMethod;
+          receiver_model?: string | null;
+          horizontal_accuracy_m?: number | null;
+          vertical_accuracy_m?: number | null;
+          fix_quality?: GnssFixQuality;
+          correction_source?: string | null;
+          source_crs?: string;
+          measured_at?: string;
+          is_manually_adjusted?: boolean;
+          captured_at?: string;
+        };
+        Update: {
+          name?: string;
+          description?: string | null;
+          department_id?: string | null;
+          installation_date?: string | null;
+          operational_status?: OperationalStatus;
+          physical_condition?: PhysicalCondition;
+          verification_status?: VerificationStatus;
+          data_quality?: DataQuality;
+          is_critical_hazard?: boolean;
+          material?: string | null;
+          diameter_mm?: number | null;
+          cable_specification?: string | null;
+          recorded_depth_m?: number | null;
+          depth_is_variable?: boolean;
+          depth_measurement_method?: DepthMeasurementMethod | null;
+          documented_before_covering?: boolean;
+          direction_description?: string | null;
+          construction_record_ref?: string | null;
+          custom_attributes?: Record<string, CustomAttributeValue>;
+          reference_benchmark_id?: string | null;
+          location_reference_text?: string | null;
+          notes?: string | null;
+          archived_at?: string | null;
+        };
+        Relationships: [];
+      };
+      survey_benchmarks: {
+        Row: {
+          asset_id: string;
+          institution_id: string;
+          reference_code: string;
+          monument_type: string;
+          elevation_m: number | null;
+          vertical_datum: string;
+          horizontal_crs: string;
+          survey_method: string;
+          horizontal_accuracy_m: number | null;
+          vertical_accuracy_m: number | null;
+          survey_date: string | null;
+          surveyor_name: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          asset_id: string;
+          institution_id: string;
+          reference_code: string;
+          monument_type: string;
+          elevation_m?: number | null;
+          vertical_datum: string;
+          horizontal_crs?: string;
+          survey_method: string;
+          horizontal_accuracy_m?: number | null;
+          vertical_accuracy_m?: number | null;
+          survey_date?: string | null;
+          surveyor_name?: string | null;
+        };
+        Update: {
+          monument_type?: string;
+          elevation_m?: number | null;
+          vertical_datum?: string;
+          horizontal_crs?: string;
+          survey_method?: string;
+          horizontal_accuracy_m?: number | null;
+          vertical_accuracy_m?: number | null;
+          survey_date?: string | null;
+          surveyor_name?: string | null;
+        };
+        Relationships: [];
+      };
+      asset_observations: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          geom: unknown;
+          depth_m: number | null;
+          depth_measurement_method: DepthMeasurementMethod | null;
+          elevation_m: number | null;
+          position_source: PositionSource;
+          receiver_model: string | null;
+          horizontal_accuracy_m: number | null;
+          vertical_accuracy_m: number | null;
+          fix_quality: GnssFixQuality;
+          correction_source: string | null;
+          source_crs: string;
+          measured_at: string;
+          notes: string | null;
+          observed_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          geom: unknown;
+          depth_m?: number | null;
+          depth_measurement_method?: DepthMeasurementMethod | null;
+          elevation_m?: number | null;
+          position_source?: PositionSource;
+          receiver_model?: string | null;
+          horizontal_accuracy_m?: number | null;
+          vertical_accuracy_m?: number | null;
+          fix_quality?: GnssFixQuality;
+          correction_source?: string | null;
+          source_crs?: string;
+          measured_at?: string;
+          notes?: string | null;
+          observed_by?: string | null;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      asset_verification_history: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          from_status: VerificationStatus | null;
+          to_status: VerificationStatus;
+          reviewer_id: string | null;
+          reviewer_role: AppRole | null;
+          remarks: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          from_status?: VerificationStatus | null;
+          to_status: VerificationStatus;
+          reviewer_id?: string | null;
+          reviewer_role?: AppRole | null;
+          remarks?: string;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      asset_photos: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          observation_id: string | null;
+          storage_path: string;
+          file_name: string;
+          mime_type: 'image/jpeg' | 'image/png' | 'image/webp';
+          file_size_bytes: number;
+          width_px: number | null;
+          height_px: number | null;
+          photo_kind: PhotoKind;
+          caption: string | null;
+          captured_at: string;
+          uploaded_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          observation_id?: string | null;
+          storage_path: string;
+          file_name: string;
+          mime_type: 'image/jpeg' | 'image/png' | 'image/webp';
+          file_size_bytes: number;
+          width_px?: number | null;
+          height_px?: number | null;
+          photo_kind?: PhotoKind;
+          caption?: string | null;
+          captured_at?: string;
+          uploaded_by?: string | null;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      asset_documents: {
+        Row: {
+          id: string;
+          institution_id: string;
+          asset_id: string;
+          storage_path: string;
+          file_name: string;
+          mime_type: string;
+          file_size_bytes: number;
+          document_kind: DocumentKind;
+          title: string;
+          description: string | null;
+          uploaded_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          institution_id: string;
+          asset_id: string;
+          storage_path: string;
+          file_name: string;
+          mime_type: string;
+          file_size_bytes: number;
+          document_kind?: DocumentKind;
+          title: string;
+          description?: string | null;
+          uploaded_by?: string | null;
+        };
+        Update: never;
+        Relationships: [];
+      };
       audit_logs: {
         Row: {
           id: string;
@@ -277,10 +647,29 @@ export interface Database {
         Args: { p_institution_id: string; p_campus_id: string };
         Returns: boolean;
       };
+      review_asset_verification: {
+        Args: {
+          p_institution_id: string;
+          p_asset_id: string;
+          p_to_status: VerificationStatus;
+          p_remarks?: string;
+        };
+        Returns: Database['public']['Tables']['assets']['Row'];
+      };
     };
     Enums: {
       app_role: AppRole;
       audit_action: AuditAction;
+      asset_category: AssetCategory;
+      utility_group: UtilityGroup;
+      operational_status: OperationalStatus;
+      physical_condition: PhysicalCondition;
+      verification_status: VerificationStatus;
+      data_quality: DataQuality;
+      gnss_fix_quality: GnssFixQuality;
+      position_source: PositionSource;
+      capture_method: CaptureMethod;
+      depth_measurement_method: DepthMeasurementMethod;
     };
     CompositeTypes: Record<string, never>;
   };

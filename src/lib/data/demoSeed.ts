@@ -1,12 +1,17 @@
+import { buildInstitutionAssetTypes } from '@/lib/assets/defaultAssetTypes';
 import { cloneDefaultLegend } from '@/lib/config/legend';
 import type { BadoLocalDatabase } from '@/lib/db/badoDb';
 import type {
   AppRole,
+  AssetRecord,
+  AssetTypeDefinition,
+  AssetVerificationEvent,
   AuditLogEntry,
   Campus,
   Department,
   Institution,
   InstitutionSettings,
+  SurveyBenchmarkRecord,
   UserInstitutionMembership,
   UserProfile,
 } from '@/types/domain';
@@ -15,9 +20,6 @@ import type {
  * Clearly labelled simulated seed records for the local demonstration & automated
  * testing environment. NEVER represents verified infrastructure of FUTA or any
  * real university (Master Specification Section 26).
- *
- * Includes TWO distinct demonstration institutions so multi-institution data
- * isolation can be tested interactively and in Vitest.
  */
 export const DEMO_IDS = {
   primaryInstitution: '11111111-1111-4111-8111-111111111101',
@@ -37,6 +39,19 @@ export const DEMO_IDS = {
   userSurveyor: '44444444-4444-4444-8444-444444444404',
   userReadOnly: '44444444-4444-4444-8444-444444444405',
   userSecondaryAdmin: '44444444-4444-4444-8444-444444444409',
+
+  // Phase 2 simulated assets
+  assetBenchmark1: '77777777-7777-4777-8777-777777777701',
+  assetBenchmark2: '77777777-7777-4777-8777-777777777702',
+  assetBorehole1: '77777777-7777-4777-8777-777777777703',
+  assetWaterTank1: '77777777-7777-4777-8777-777777777704',
+  assetTransformer1: '77777777-7777-4777-8777-777777777705',
+  assetBuilding1: '77777777-7777-4777-8777-777777777706',
+  assetWaterPipe1: '77777777-7777-4777-8777-777777777707',
+  assetElecCable1: '77777777-7777-4777-8777-777777777708',
+  assetFibreCable1: '77777777-7777-4777-8777-777777777709',
+  assetDrainPipe1: '77777777-7777-4777-8777-777777777710',
+  assetSecondaryBorehole: '77777777-7777-4777-8777-777777777799',
 } as const;
 
 export interface DemoPersona {
@@ -108,9 +123,22 @@ export const DEMO_PERSONAS: DemoPersona[] = [
 
 const SEED_TIMESTAMP = '2026-11-18T08:00:00.000Z';
 
+function findTypeId(types: AssetTypeDefinition[], code: string): string {
+  const found = types.find((t) => t.code === code);
+  if (!found) throw new Error(`Missing default asset type code: ${code}`);
+  return found.id;
+}
+
 export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
-  const existing = await db.institutions.get(DEMO_IDS.primaryInstitution);
-  if (existing) return;
+  const existingInstitution = await db.institutions.get(DEMO_IDS.primaryInstitution);
+  const existingAssetTypesCount = await db.assetTypes
+    .where('institutionId')
+    .equals(DEMO_IDS.primaryInstitution)
+    .count();
+
+  if (existingInstitution && existingAssetTypesCount > 0) {
+    return;
+  }
 
   const institutions: Institution[] = [
     {
@@ -350,6 +378,550 @@ export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
     },
   ];
 
+  // Phase 2 asset type catalogs per institution
+  const primaryTypes = buildInstitutionAssetTypes(
+    DEMO_IDS.primaryInstitution,
+    SEED_TIMESTAMP,
+  );
+  const secondaryTypes = buildInstitutionAssetTypes(
+    DEMO_IDS.secondaryInstitution,
+    SEED_TIMESTAMP,
+  );
+  const allAssetTypes = [...primaryTypes, ...secondaryTypes];
+
+  // Clearly labelled simulated infrastructure register (Section 26)
+  const baseAssetDefaults = {
+    material: null,
+    diameterMm: null,
+    cableSpecification: null,
+    recordedDepthM: null,
+    depthIsVariable: true,
+    depthMeasurementMethod: null,
+    documentedBeforeCovering: false,
+    directionDescription: null,
+    constructionRecordRef: null,
+    referenceBenchmarkId: null,
+    locationReferenceText: null,
+    notes: null,
+    receiverModel: null,
+    verticalAccuracyM: null,
+    correctionSource: null,
+    sourceCrs: 'EPSG:4326',
+    measuredAt: SEED_TIMESTAMP,
+    isManuallyAdjusted: false,
+    capturedAt: SEED_TIMESTAMP,
+    version: 1,
+    archivedAt: null,
+    archivedBy: null,
+    createdAt: SEED_TIMESTAMP,
+    updatedAt: SEED_TIMESTAMP,
+    localSyncStatus: 'synced' as const,
+  };
+
+  const assets: AssetRecord[] = [
+    // 1. Survey Benchmark (Main Demo Campus — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetBenchmark1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptSurvey,
+      assetTypeId: findTypeId(primaryTypes, 'SURVEY_BENCHMARK'),
+      assetCode: 'BM-DEMO-001',
+      name: 'Demo North Gate Primary Benchmark (Simulated)',
+      category: 'survey_reference',
+      utilityGroup: 'survey_benchmark',
+      description:
+        'Simulated reinforced concrete survey monument with stamped brass disc at North Gate verge.',
+      geometry: { type: 'Point', coordinates: [5.1378, 7.3051] },
+      installationDate: '2022-03-14',
+      operationalStatus: 'operational',
+      physicalCondition: 'excellent',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      customAttributes: {},
+      locationReferenceText: '12 m east of Demo North Gate security lodge',
+      positionSource: 'external_gnss',
+      captureMethod: 'gps_point',
+      receiverModel: 'Simulated Dual-Freq RTK Rover',
+      horizontalAccuracyM: 0.018,
+      verticalAccuracyM: 0.025,
+      fixQuality: 'rtk_fixed',
+      correctionSource: 'Local Base RTK',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSupervisor,
+      createdBy: DEMO_IDS.userSurveyor,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // 2. Geodetic Control Point (South Annex — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetBenchmark2,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.annexCampus,
+      departmentId: DEMO_IDS.deptSurvey,
+      assetTypeId: findTypeId(primaryTypes, 'GEODETIC_CONTROL'),
+      assetCode: 'GCP-ANNEX-001',
+      name: 'Demo Engineering Workshop Control Pillar (Simulated)',
+      category: 'survey_reference',
+      utilityGroup: 'survey_benchmark',
+      description: 'Simulated campus traverse control monument on South Annex quadrangle.',
+      geometry: { type: 'Point', coordinates: [5.1476, 7.2968] },
+      installationDate: '2023-01-19',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      customAttributes: {},
+      positionSource: 'external_gnss',
+      captureMethod: 'gps_point',
+      receiverModel: 'Simulated Dual-Freq RTK Rover',
+      horizontalAccuracyM: 0.022,
+      verticalAccuracyM: 0.031,
+      fixQuality: 'rtk_fixed',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSupervisor,
+      createdBy: DEMO_IDS.userSurveyor,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // 3. Surface — Borehole (Main Demo Campus — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetBorehole1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptWater,
+      assetTypeId: findTypeId(primaryTypes, 'BOREHOLE'),
+      assetCode: 'BH-DEMO-001',
+      name: 'Demo Senate Quad Borehole No. 1 (Simulated)',
+      category: 'surface',
+      utilityGroup: 'water',
+      description:
+        'Simulated production borehole with fenced wellhead chamber supplying the central overhead reservoir.',
+      geometry: { type: 'Point', coordinates: [5.1389, 7.3045] },
+      installationDate: '2023-06-20',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      customAttributes: {
+        drilledDepthM: 115,
+        casingDiameterMm: 150,
+        pumpType: 'Submersible electric',
+        staticWaterLevelM: 18.4,
+        yieldLps: 2.8,
+        drillingContractor: 'Demo Hydro Drilling Ltd (Simulated)',
+      },
+      referenceBenchmarkId: DEMO_IDS.assetBenchmark1,
+      locationReferenceText: 'Behind simulated Senate service yard',
+      positionSource: 'smartphone_gps',
+      captureMethod: 'gps_point',
+      horizontalAccuracyM: 4.2,
+      fixQuality: 'autonomous',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSupervisor,
+      createdBy: DEMO_IDS.userTechnician,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // 4. Surface — Elevated Water Tank (Main Demo Campus — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetWaterTank1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptWater,
+      assetTypeId: findTypeId(primaryTypes, 'WATER_TANK'),
+      assetCode: 'WT-DEMO-001',
+      name: 'Demo Hostel Ridge Elevated Steel Tank (Simulated)',
+      category: 'surface',
+      utilityGroup: 'water',
+      description: 'Simulated 150 m³ pressed-steel elevated storage tank on 12 m stanchion.',
+      geometry: { type: 'Point', coordinates: [5.1402, 7.304] },
+      installationDate: '2020-09-10',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      customAttributes: {
+        capacityM3: 150,
+        tankStructure: 'Braithwaite pressed steel',
+        elevationHeightM: 12,
+        supplySource: 'BH-DEMO-001',
+      },
+      positionSource: 'smartphone_gps',
+      captureMethod: 'gps_point',
+      horizontalAccuracyM: 5.1,
+      fixQuality: 'autonomous',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSupervisor,
+      createdBy: DEMO_IDS.userTechnician,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // 5. Surface — Transformer (Main Demo Campus — Submitted / Pending Verification)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetTransformer1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptElectrical,
+      assetTypeId: findTypeId(primaryTypes, 'TRANSFORMER'),
+      assetCode: 'TRF-DEMO-001',
+      name: 'Demo Science Block 500kVA Transformer (Simulated)',
+      category: 'surface',
+      utilityGroup: 'electrical',
+      description:
+        'Simulated 11kV/0.415kV distribution transformer within fenced concrete plinth.',
+      geometry: { type: 'Point', coordinates: [5.1397, 7.3038] },
+      installationDate: '2021-11-05',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'submitted',
+      dataQuality: 'unverified',
+      isCriticalHazard: true,
+      customAttributes: {
+        ratingKva: 500,
+        voltageRatio: '11kV / 0.415kV',
+        coolingType: 'ONAN (Oil-immersed)',
+        feederName: 'Demo Ring Feeder A',
+        manufacturer: 'Demo Power Systems',
+      },
+      referenceBenchmarkId: DEMO_IDS.assetBenchmark1,
+      locationReferenceText: 'Adjacent to simulated Science Block car park',
+      positionSource: 'smartphone_gps',
+      captureMethod: 'gps_point',
+      horizontalAccuracyM: 5.8,
+      fixQuality: 'autonomous',
+      lastVerifiedAt: null,
+      lastVerifiedBy: null,
+      createdBy: DEMO_IDS.userTechnician,
+      updatedBy: DEMO_IDS.userTechnician,
+    },
+    // 6. Surface — Building (South Annex — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetBuilding1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.annexCampus,
+      departmentId: DEMO_IDS.deptWorks,
+      assetTypeId: findTypeId(primaryTypes, 'BUILDING'),
+      assetCode: 'BLD-ANNEX-001',
+      name: 'Demo Civil & Geotechnical Lab Complex (Simulated)',
+      category: 'surface',
+      utilityGroup: 'surface_facility',
+      description: 'Simulated two-floor engineering laboratory facility on South Annex.',
+      geometry: { type: 'Point', coordinates: [5.1483, 7.2963] },
+      installationDate: '2019-04-12',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      customAttributes: {
+        buildingUse: 'Laboratory / Workshop',
+        floorCount: 2,
+      },
+      referenceBenchmarkId: DEMO_IDS.assetBenchmark2,
+      positionSource: 'smartphone_gps',
+      captureMethod: 'manual_pin',
+      horizontalAccuracyM: 6.4,
+      fixQuality: 'autonomous',
+      isManuallyAdjusted: true,
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userAdmin,
+      createdBy: DEMO_IDS.userSurveyor,
+      updatedBy: DEMO_IDS.userAdmin,
+    },
+    // 7. Underground — Water Pipeline Route (Main Demo Campus — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetWaterPipe1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptWater,
+      assetTypeId: findTypeId(primaryTypes, 'WATER_PIPELINE'),
+      assetCode: 'WP-DEMO-001',
+      name: 'Demo Borehole-to-Tank HDPE Rising Main (Simulated)',
+      category: 'underground',
+      utilityGroup: 'water',
+      description:
+        'Simulated 110 mm HDPE water pipeline documented in open trench prior to backfilling.',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [5.1389, 7.3045],
+          [5.1394, 7.3042],
+          [5.1402, 7.304],
+        ],
+      },
+      installationDate: '2023-07-02',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      material: 'HDPE PE100',
+      diameterMm: 110,
+      recordedDepthM: 1.2,
+      depthIsVariable: true,
+      depthMeasurementMethod: 'open_trench_tape',
+      documentedBeforeCovering: true,
+      directionDescription: 'East-southeast from BH-DEMO-001 toward WT-DEMO-001',
+      constructionRecordRef: 'DEMO-WORKS-2023-W04',
+      customAttributes: {
+        serviceType: 'Raw borehole rising main',
+        pressureClass: 'PN16',
+        warningTapeInstalled: 'Yes',
+      },
+      referenceBenchmarkId: DEMO_IDS.assetBenchmark1,
+      positionSource: 'smartphone_gps',
+      captureMethod: 'gps_walk_route',
+      horizontalAccuracyM: 4.5,
+      fixQuality: 'autonomous',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSupervisor,
+      createdBy: DEMO_IDS.userTechnician,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // 8. Underground — 11kV Electrical Cable (Main Demo Campus — Needs Re-survey)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetElecCable1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptElectrical,
+      assetTypeId: findTypeId(primaryTypes, 'ELECTRICAL_CABLE'),
+      assetCode: 'EC-DEMO-001',
+      name: 'Demo 11kV Underground Ring Feeder A (Simulated)',
+      category: 'underground',
+      utilityGroup: 'electrical',
+      description:
+        'Simulated armoured 11kV underground cable feeding Science Block substation. Flagged for higher-precision survey verification.',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [5.1381, 7.3049],
+          [5.139, 7.3043],
+          [5.1397, 7.3038],
+        ],
+      },
+      installationDate: '2021-10-28',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'needs_resurvey',
+      dataQuality: 'needs_resurvey',
+      isCriticalHazard: true,
+      material: 'XLPE/SWA/PVC Copper',
+      cableSpecification: '3-core × 95 mm² 11kV XLPE Armoured',
+      recordedDepthM: 0.95,
+      depthIsVariable: true,
+      depthMeasurementMethod: 'as_built_record',
+      documentedBeforeCovering: false,
+      directionDescription: 'North Gate switching point to TRF-DEMO-001',
+      customAttributes: {
+        voltageLevel: '11kV HV',
+        conductorMaterial: 'Copper',
+        burialProtection: 'Direct buried + tiles/tape',
+      },
+      positionSource: 'smartphone_gps',
+      captureMethod: 'gps_walk_route',
+      horizontalAccuracyM: 11.4,
+      fixQuality: 'autonomous',
+      notes: 'GPS accuracy degraded near tree canopy; scheduled for RTK check.',
+      lastVerifiedAt: null,
+      lastVerifiedBy: null,
+      createdBy: DEMO_IDS.userTechnician,
+      updatedBy: DEMO_IDS.userSurveyor,
+    },
+    // 9. Underground — Fibre-Optic Backbone (Main Demo Campus — Verified)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetFibreCable1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.mainCampus,
+      departmentId: DEMO_IDS.deptIct,
+      assetTypeId: findTypeId(primaryTypes, 'FIBRE_CABLE'),
+      assetCode: 'FOC-DEMO-001',
+      name: 'Demo ICT-to-Library 48-Core Fibre Duct (Simulated)',
+      category: 'underground',
+      utilityGroup: 'telecom',
+      description:
+        'Simulated 48-core single-mode fibre cable in 50 mm HDPE sub-duct along main walkway.',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [5.1383, 7.3039],
+          [5.1392, 7.3036],
+        ],
+      },
+      installationDate: '2024-02-15',
+      operationalStatus: 'operational',
+      physicalCondition: 'excellent',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      material: 'HDPE Sub-duct',
+      diameterMm: 50,
+      cableSpecification: '48-core OS2 Single-Mode Optical Fibre',
+      recordedDepthM: 0.75,
+      depthIsVariable: true,
+      depthMeasurementMethod: 'open_trench_tape',
+      documentedBeforeCovering: true,
+      customAttributes: {
+        coreCount: '48-core',
+        fibreMode: 'HDPE sub-duct',
+        linkRouteName: 'Demo ICT Centre → Demo Central Library',
+      },
+      positionSource: 'external_gnss',
+      captureMethod: 'gps_walk_route',
+      horizontalAccuracyM: 0.45,
+      fixQuality: 'differential',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSupervisor,
+      createdBy: DEMO_IDS.userSurveyor,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // 10. Underground — Drainage Culvert (South Annex — Under Review)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetDrainPipe1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      campusId: DEMO_IDS.annexCampus,
+      departmentId: DEMO_IDS.deptWorks,
+      assetTypeId: findTypeId(primaryTypes, 'DRAINAGE_PIPE'),
+      assetCode: 'DRN-ANNEX-001',
+      name: 'Demo Annex Access Road Storm Culvert (Simulated)',
+      category: 'underground',
+      utilityGroup: 'drainage_sewer',
+      description: 'Simulated precast concrete storm drainage pipe beneath Annex access road.',
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [5.1479, 7.2966],
+          [5.1485, 7.2961],
+        ],
+      },
+      installationDate: '2020-05-18',
+      operationalStatus: 'operational',
+      physicalCondition: 'fair',
+      verificationStatus: 'under_review',
+      dataQuality: 'unverified',
+      isCriticalHazard: false,
+      material: 'Reinforced Concrete',
+      diameterMm: 600,
+      recordedDepthM: 1.6,
+      depthIsVariable: true,
+      depthMeasurementMethod: 'survey_level',
+      documentedBeforeCovering: false,
+      customAttributes: {
+        conduitShape: 'Circular pipe',
+        outfallTarget: 'Demo South Retention Channel',
+      },
+      positionSource: 'smartphone_gps',
+      captureMethod: 'manual_draw',
+      horizontalAccuracyM: 6.0,
+      fixQuality: 'autonomous',
+      lastVerifiedAt: null,
+      lastVerifiedBy: null,
+      createdBy: DEMO_IDS.userTechnician,
+      updatedBy: DEMO_IDS.userSupervisor,
+    },
+    // Secondary Institution Isolated Asset (must NEVER be visible to primary institution)
+    {
+      ...baseAssetDefaults,
+      id: DEMO_IDS.assetSecondaryBorehole,
+      institutionId: DEMO_IDS.secondaryInstitution,
+      campusId: DEMO_IDS.secondaryCampus,
+      departmentId: DEMO_IDS.deptSecondaryWorks,
+      assetTypeId: findTypeId(secondaryTypes, 'BOREHOLE'),
+      assetCode: 'BH-WCT-001',
+      name: 'Westridge Admin Borehole (Simulated)',
+      category: 'surface',
+      utilityGroup: 'water',
+      description: 'Independent simulated borehole belonging only to Westridge College.',
+      geometry: { type: 'Point', coordinates: [3.8965, 7.4412] },
+      installationDate: '2024-01-10',
+      operationalStatus: 'operational',
+      physicalCondition: 'good',
+      verificationStatus: 'verified',
+      dataQuality: 'verified',
+      isCriticalHazard: false,
+      customAttributes: { drilledDepthM: 95, pumpType: 'Solar submersible' },
+      positionSource: 'smartphone_gps',
+      captureMethod: 'gps_point',
+      horizontalAccuracyM: 3.9,
+      fixQuality: 'autonomous',
+      lastVerifiedAt: SEED_TIMESTAMP,
+      lastVerifiedBy: DEMO_IDS.userSecondaryAdmin,
+      createdBy: DEMO_IDS.userSecondaryAdmin,
+      updatedBy: DEMO_IDS.userSecondaryAdmin,
+    },
+  ];
+
+  const benchmarks: SurveyBenchmarkRecord[] = [
+    {
+      assetId: DEMO_IDS.assetBenchmark1,
+      institutionId: DEMO_IDS.primaryInstitution,
+      referenceCode: 'BM-DEMO-001',
+      monumentType: 'Concrete Pillar with Brass Cap',
+      elevationM: 362.415,
+      verticalDatum: 'EGM2008 Orthometric',
+      horizontalCrs: 'EPSG:4326',
+      surveyMethod: 'Dual-Frequency RTK GNSS',
+      horizontalAccuracyM: 0.018,
+      verticalAccuracyM: 0.025,
+      surveyDate: '2022-03-14',
+      surveyorName: 'Surv. Halima Ibrahim (Demo)',
+      createdAt: SEED_TIMESTAMP,
+      updatedAt: SEED_TIMESTAMP,
+    },
+    {
+      assetId: DEMO_IDS.assetBenchmark2,
+      institutionId: DEMO_IDS.primaryInstitution,
+      referenceCode: 'GCP-ANNEX-001',
+      monumentType: 'Concrete Pillar with Iron Pin',
+      elevationM: 358.89,
+      verticalDatum: 'EGM2008 Orthometric',
+      horizontalCrs: 'EPSG:4326',
+      surveyMethod: 'Dual-Frequency RTK GNSS',
+      horizontalAccuracyM: 0.022,
+      verticalAccuracyM: 0.031,
+      surveyDate: '2023-01-19',
+      surveyorName: 'Surv. Halima Ibrahim (Demo)',
+      createdAt: SEED_TIMESTAMP,
+      updatedAt: SEED_TIMESTAMP,
+    },
+  ];
+
+  const verificationHistory: AssetVerificationEvent[] = assets.map((asset, index) => ({
+    id: `99999999-9999-4999-8999-9999999999${String(index + 1).padStart(2, '0')}`,
+    institutionId: asset.institutionId,
+    assetId: asset.id,
+    fromStatus: null,
+    toStatus: asset.verificationStatus,
+    reviewerId: asset.lastVerifiedBy ?? asset.createdBy,
+    reviewerName:
+      asset.verificationStatus === 'verified'
+        ? 'Engr. Chioma Nwosu'
+        : asset.verificationStatus === 'needs_resurvey'
+          ? 'Surv. Halima Ibrahim'
+          : 'Tunde Akinwale',
+    reviewerRole:
+      asset.verificationStatus === 'verified'
+        ? 'supervisor'
+        : asset.verificationStatus === 'needs_resurvey'
+          ? 'surveyor_gis'
+          : 'field_technician',
+    remarks:
+      asset.verificationStatus === 'needs_resurvey'
+        ? 'Canopy interference caused >10 m horizontal GPS error; flagged for RTK re-survey.'
+        : `Seeded demonstration record (${asset.verificationStatus}).`,
+    createdAt: SEED_TIMESTAMP,
+  }));
+
   const auditLogs: AuditLogEntry[] = [
     {
       id: '66666666-6666-4666-8666-666666666601',
@@ -360,9 +932,10 @@ export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
       action: 'insert',
       entityType: 'institutions',
       entityId: DEMO_IDS.primaryInstitution,
-      summary: 'Initialised BADO Demonstration University (Simulated) sandbox.',
+      summary:
+        'Initialised BADO Demonstration University (Simulated) sandbox with sample infrastructure records.',
       oldData: null,
-      newData: { slug: 'bado-demo-university', isDemo: true },
+      newData: { slug: 'bado-demo-university', isDemo: true, sampleAssets: 10 },
       createdAt: SEED_TIMESTAMP,
     },
     {
@@ -390,16 +963,26 @@ export async function ensureDemoSeedData(db: BadoLocalDatabase): Promise<void> {
       db.departments,
       db.profiles,
       db.userInstitutions,
+      db.assetTypes,
+      db.assets,
+      db.surveyBenchmarks,
+      db.verificationHistory,
       db.auditLogs,
     ],
     async () => {
-      await db.institutions.bulkPut(institutions);
-      await db.institutionSettings.bulkPut(settings);
-      await db.campuses.bulkPut(campuses);
-      await db.departments.bulkPut(departments);
-      await db.profiles.bulkPut(profiles);
-      await db.userInstitutions.bulkPut(memberships);
-      await db.auditLogs.bulkPut(auditLogs);
+      if (!existingInstitution) {
+        await db.institutions.bulkPut(institutions);
+        await db.institutionSettings.bulkPut(settings);
+        await db.campuses.bulkPut(campuses);
+        await db.departments.bulkPut(departments);
+        await db.profiles.bulkPut(profiles);
+        await db.userInstitutions.bulkPut(memberships);
+        await db.auditLogs.bulkPut(auditLogs);
+      }
+      await db.assetTypes.bulkPut(allAssetTypes);
+      await db.assets.bulkPut(assets);
+      await db.surveyBenchmarks.bulkPut(benchmarks);
+      await db.verificationHistory.bulkPut(verificationHistory);
     },
   );
 }
