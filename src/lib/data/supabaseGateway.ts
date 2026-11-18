@@ -1,3 +1,4 @@
+import { cacheAndMergeServerAssets } from '@/lib/sync/assetCache';
 import type { Geometry } from 'geojson';
 import { z } from 'zod';
 import { isPendingVerification } from '@/lib/assets/labels';
@@ -1019,21 +1020,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
       }
     } else {
       const serverAssets = (assetData ?? []).map(mapAsset);
-      await badoDb.assets.bulkPut(serverAssets);
-
-      // Merge any locally pending offline assets not yet uploaded
-      const localPending = await badoDb.assets
-        .where('institutionId')
-        .equals(institutionId)
-        .filter((a) => a.localSyncStatus === 'pending' && a.archivedAt === null)
-        .toArray();
-      const mergedMap = new Map(serverAssets.map((a) => [a.id, a]));
-      for (const pending of localPending) {
-        if (!mergedMap.has(pending.id)) {
-          mergedMap.set(pending.id, pending);
-        }
-      }
-      assets = [...mergedMap.values()];
+      assets = await cacheAndMergeServerAssets(institutionId, serverAssets);
 
       const [bmRes, photoRes, docRes, depthRes] = await Promise.all([
         supabase
@@ -1095,6 +1082,10 @@ export class SupabaseDataGateway implements BadoDataGateway {
     return assets
       .filter((asset) => {
         if (filters.campusId && asset.campusId !== filters.campusId) return false;
+        if (filters.category && filters.category !== 'all' && asset.category !== filters.category) return false;
+        if (filters.assetTypeId && filters.assetTypeId !== 'all' && asset.assetTypeId !== filters.assetTypeId) return false;
+        if (filters.utilityGroup && filters.utilityGroup !== 'all' && asset.utilityGroup !== filters.utilityGroup) return false;
+        if (filters.verificationStatus && filters.verificationStatus !== 'all' && filters.verificationStatus !== 'pending_review' && asset.verificationStatus !== filters.verificationStatus) return false;
         if (
           filters.operationalStatus &&
           filters.operationalStatus !== 'all' &&
@@ -1224,7 +1215,10 @@ export class SupabaseDataGateway implements BadoDataGateway {
       throw new Error(assetErr.message);
     }
 
-    const asset = mapAsset(assetRow);
+    const serverAsset = mapAsset(assetRow);
+    const cachedAsset = await badoDb.assets.get(assetId);
+    const hasPendingLocalAsset = cachedAsset?.institutionId === institutionId && cachedAsset.localSyncStatus === 'pending';
+    const asset = hasPendingLocalAsset ? cachedAsset : serverAsset;
     const [
       assetTypes,
       campuses,
@@ -1344,18 +1338,31 @@ export class SupabaseDataGateway implements BadoDataGateway {
       }
     }
 
-    const routeVertices = (verticesRes.data ?? []).map(mapRouteVertex);
-    const depthObservations = (depthObsRes.data ?? []).map(mapDepthObservation);
-    const junctions = (junctionsRes.data ?? []).map(mapJunction);
+    const serverVertices = (verticesRes.data ?? []).map(mapRouteVertex);
+    const serverDepths = (depthObsRes.data ?? []).map(mapDepthObservation);
+    const serverJunctions = (junctionsRes.data ?? []).map(mapJunction);
+    const routeVertices = hasPendingLocalAsset
+      ? await badoDb.routeVertices.where('[institutionId+assetId]').equals([institutionId, asset.id]).toArray()
+      : serverVertices;
+    const junctions = hasPendingLocalAsset
+      ? await badoDb.utilityJunctions.where('[institutionId+assetId]').equals([institutionId, asset.id]).toArray()
+      : serverJunctions;
+    const pendingDepthIds = new Set((await badoDb.syncQueue.where('institutionId').equals(institutionId)
+      .filter(q => q.recordType === 'utility_depth_observations' && q.status !== 'synced').toArray()).map(q => q.recordId));
+    const localDepths = await badoDb.depthObservations.where('[institutionId+assetId]').equals([institutionId, asset.id])
+      .filter(d => pendingDepthIds.has(d.id) || hasPendingLocalAsset).toArray();
+    const depthById = new Map(serverDepths.map(d => [d.id, d]));
+    for (const depth of localDepths) depthById.set(depth.id, depth);
+    const depthObservations = [...depthById.values()];
 
-    if (routeVertices.length > 0) {
-      await badoDb.routeVertices.bulkPut(routeVertices);
+    if (!hasPendingLocalAsset && serverVertices.length > 0) {
+      await badoDb.routeVertices.bulkPut(serverVertices);
     }
-    if (depthObservations.length > 0) {
-      await badoDb.depthObservations.bulkPut(depthObservations);
+    if (serverDepths.length > 0) {
+      await badoDb.depthObservations.bulkPut(serverDepths.filter(d => !pendingDepthIds.has(d.id)));
     }
-    if (junctions.length > 0) {
-      await badoDb.utilityJunctions.bulkPut(junctions);
+    if (!hasPendingLocalAsset && serverJunctions.length > 0) {
+      await badoDb.utilityJunctions.bulkPut(serverJunctions);
     }
 
     return {
@@ -2061,6 +2068,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
           badoDb.routeVertices,
           badoDb.depthObservations,
           badoDb.utilityJunctions,
+          badoDb.syncQueue,
         ],
         async () => {
           await badoDb.assets.put(localRecord);
@@ -2073,23 +2081,17 @@ export class SupabaseDataGateway implements BadoDataGateway {
           if (junctionRecords.length > 0) {
             await badoDb.utilityJunctions.bulkPut(junctionRecords);
           }
+          await enqueueSyncOperation({
+            institutionId,
+            campusId: input.campusId,
+            recordType: 'assets',
+            recordId: id,
+            operationType: 'create',
+            payload: { assetInsert, routeVertexInserts: vertexInserts, depthObservationInserts: depthInserts, junctionInserts },
+            capturedAt,
+          });
         },
       );
-
-      await enqueueSyncOperation({
-        institutionId,
-        campusId: input.campusId,
-        recordType: 'assets',
-        recordId: id,
-        operationType: 'create',
-        payload: {
-          assetInsert,
-          routeVertexInserts: vertexInserts,
-          depthObservationInserts: depthInserts,
-          junctionInserts,
-        },
-        capturedAt,
-      });
 
       return localRecord;
     }
@@ -2251,7 +2253,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
 
       await badoDb.transaction(
         'rw',
-        [badoDb.assets, badoDb.routeVertices, badoDb.utilityJunctions],
+        [badoDb.assets, badoDb.routeVertices, badoDb.utilityJunctions, badoDb.syncQueue],
         async () => {
           await badoDb.assets.put(updatedLocal);
           await badoDb.routeVertices
@@ -2270,23 +2272,18 @@ export class SupabaseDataGateway implements BadoDataGateway {
               await badoDb.utilityJunctions.bulkPut(junctionRecords);
             }
           }
+          await enqueueSyncOperation({
+            institutionId,
+            campusId: existing.campusId,
+            recordType: 'assets',
+            recordId: existing.id,
+            operationType: 'update',
+            payload: { assetUpdate: updatePayload, routeVertexInserts: vertexInserts, junctionInserts: junctionInserts ?? null, editNotes: input.editNotes ?? null },
+            baseVersion: existing.version,
+            capturedAt: now,
+          });
         },
       );
-
-      await enqueueSyncOperation({
-        institutionId,
-        campusId: existing.campusId,
-        recordType: 'assets',
-        recordId: existing.id,
-        operationType: 'update',
-        payload: {
-          assetUpdate: updatePayload,
-          routeVertexInserts: vertexInserts,
-          junctionInserts: junctionInserts ?? null,
-          editNotes: input.editNotes ?? null,
-        },
-        capturedAt: now,
-      });
 
       return updatedLocal;
     }
@@ -2394,15 +2391,17 @@ export class SupabaseDataGateway implements BadoDataGateway {
         observedBy: null,
         createdAt: now,
       };
-      await badoDb.depthObservations.put(localObs);
-      await enqueueSyncOperation({
-        institutionId,
-        campusId: cachedAsset?.campusId ?? null,
-        recordType: 'utility_depth_observations',
-        recordId: id,
-        operationType: 'create',
-        payload: { depthObservationInsert: insertPayload },
-        capturedAt: localObs.observedAt,
+      await badoDb.transaction('rw', [badoDb.depthObservations, badoDb.syncQueue], async () => {
+        await badoDb.depthObservations.put(localObs);
+        await enqueueSyncOperation({
+          institutionId,
+          campusId: cachedAsset?.campusId ?? null,
+          recordType: 'utility_depth_observations',
+          recordId: id,
+          operationType: 'create',
+          payload: { depthObservationInsert: insertPayload },
+          capturedAt: localObs.observedAt,
+        });
       });
       return localObs;
     }

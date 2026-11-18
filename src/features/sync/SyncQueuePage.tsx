@@ -63,8 +63,7 @@ export function SyncQueuePage() {
           Offline Storage &amp; Synchronisation Queue
         </h1>
         <p className="mt-0.5 text-sm text-slate-600">
-          Inspect locally queued field operations, retry failed uploads, and verify
-          cached reference data freshness.
+          Inspect locally queued field operations and cached reference data freshness.
         </p>
       </div>
 
@@ -76,6 +75,9 @@ export function SyncQueuePage() {
         </Alert>
       )}
 
+      <Alert tone="warning" title="Automatic synchronisation is not yet available">
+        Queued changes remain on this device and are not uploaded automatically when connectivity returns. Requeueing only resets a failed item to pending; it does not transmit it. Keep this device and its browser data until a verified sync process is available.
+      </Alert>
       {errorMessage && <Alert tone="danger">{errorMessage}</Alert>}
 
       <Card
@@ -124,7 +126,7 @@ export function SyncQueuePage() {
                       leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
                       onClick={() => void handleRetry(item.id)}
                     >
-                      Retry
+                      Requeue
                     </Button>
                   )}
                 </div>
