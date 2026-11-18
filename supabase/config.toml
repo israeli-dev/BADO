@@ -1,0 +1,29 @@
+# BADO University Edition — Supabase CLI Configuration
+# Docs: https://supabase.com/docs/guides/cli/config
+
+project_id = "bado-university"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[auth]
+enabled = true
+enable_signup = false
+enable_anonymous_sign_ins = false
+minimum_password_length = 10
+
+[storage]
+enabled = true
+file_size_limit = "15MiB"
