@@ -38,6 +38,7 @@ import {
   useUploadAssetPhoto,
 } from '@/features/assets/useAssets';
 import { useAuth } from '@/features/auth/AuthContext';
+import { PendingMedia } from '@/features/assets/PendingMedia';
 import {
   ASSET_CATEGORY_LABELS,
   CAPTURE_METHOD_LABELS,
@@ -52,7 +53,7 @@ import {
 } from '@/lib/assets/labels';
 import { extractPrimaryCoordinates } from '@/lib/geo/geolocation';
 import { formatFileSize } from '@/lib/media/fileValidation';
-import { ROLE_METADATA } from '@/lib/permissions/rbac';
+import { canAccessCampus, ROLE_METADATA } from '@/lib/permissions/rbac';
 import { useOnlineStatus } from '@/lib/sync/useOnlineStatus';
 import {
   DOCUMENT_KINDS,
@@ -66,7 +67,7 @@ export function AssetDetailPage() {
   const { assetId } = useParams<{ assetId: string }>();
   const navigate = useNavigate();
   const isOnline = useOnlineStatus();
-  const { session, activeRole, can, gateway } = useAuth();
+  const { session, activeRole, activeMembership, can, gateway } = useAuth();
 
   const { data: detail, isLoading, error } = useAssetDetail(assetId);
   const submitDraft = useSubmitDraftAsset();
@@ -635,6 +636,10 @@ export function AssetDetailPage() {
                 />
               </dl>
             </Card>
+          )}
+
+          {gateway.mode === 'supabase' && session && activeMembership && asset.institutionId === activeMembership.institutionId && canAccessCampus(activeMembership, asset.campusId) && (
+            <PendingMedia key={`${asset.institutionId}:${asset.id}:${session.user.id}`} institutionId={asset.institutionId} assetId={asset.id} campusId={asset.campusId} actorId={session.user.id} />
           )}
 
           {/* Photographs Card */}
