@@ -1,3 +1,4 @@
+import { buildDemoDigReport, validateDigCheck, type DigCheckInput, type DigCheckReport } from '@/lib/digCheck/digCheck';
 import { z } from 'zod';
 import { isPendingVerification } from '@/lib/assets/labels';
 import {
@@ -768,6 +769,16 @@ export class LocalDemoDataGateway implements BadoDataGateway {
     }
 
     return results.sort((a, b) => a.referenceCode.localeCompare(b.referenceCode));
+  }
+
+  async checkBeforeDig(institutionId: string, input: DigCheckInput): Promise<DigCheckReport> {
+    validateDigCheck(input);
+    const { membership } = await this.requireMembership(institutionId);
+    assertPermission(membership, institutionId, 'dig_check:run');
+    if (!canAccessCampus(membership, input.campusId)) throw new Error('ACCESS DENIED: Campus is not accessible.');
+    const campus = await this.db.campuses.get(input.campusId);
+    if (!campus || campus.institutionId !== institutionId || !campus.isActive) throw new Error('Campus is not accessible.');
+    return buildDemoDigReport(input, await this.listAssets(institutionId, { campusId: input.campusId }));
   }
 
   async listAssets(

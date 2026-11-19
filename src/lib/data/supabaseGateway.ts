@@ -1,3 +1,4 @@
+import { validateDigCheck, digCheckReportSchema, type DigCheckInput, type DigCheckReport } from '@/lib/digCheck/digCheck';
 import type { Json } from '@/types/database';
 import { cacheAndMergeServerAssets } from '@/lib/sync/assetCache';
 import type { Geometry } from 'geojson';
@@ -991,6 +992,18 @@ export class SupabaseDataGateway implements BadoDataGateway {
         verticalDatum: item.benchmark.verticalDatum,
       }))
       .sort((a, b) => a.referenceCode.localeCompare(b.referenceCode));
+  }
+
+  async checkBeforeDig(institutionId: string, input: DigCheckInput): Promise<DigCheckReport> {
+    validateDigCheck(input);
+    if (!navigator.onLine) throw new Error('This check requires an online connection. Cached data is not sufficient for this check.');
+    const { data, error } = await getSupabaseClient().rpc('check_before_dig', {
+      p_institution_id: institutionId, p_campus_id: input.campusId,
+      p_geometry: input.geometry as unknown as Json, p_buffer_m: input.bufferM,
+    });
+    if (error) throw new Error(error.message);
+    const report = digCheckReportSchema.parse(data);
+    return { ...report, mode: 'supabase' };
   }
 
   async listAssets(
