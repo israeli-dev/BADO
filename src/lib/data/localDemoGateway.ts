@@ -268,6 +268,10 @@ export class LocalDemoDataGateway implements BadoDataGateway {
     );
   }
 
+  async resendConfirmation(): Promise<void> {
+    throw new Error('Confirmation emails are unavailable in demo mode.');
+  }
+
   async signUp(): Promise<AuthSessionState | null> {
     throw new Error('Account registration is unavailable in demo mode. Connect Supabase to create an account.');
   }

@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -26,6 +27,7 @@ export interface AuthContextValue {
   gateway: FoundationDataGateway;
   session: AuthSessionState | null;
   isLoading: boolean;
+  sessionError: string | null;
   activeMembership: UserInstitutionMembership | null;
   activeInstitution: Institution | null;
   activeRole: AppRole | null;
@@ -75,6 +77,9 @@ export function AuthProvider({
   const queryClient = useQueryClient();
   const [session, setSession] = useState<AuthSessionState | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const sessionRequest = useRef(0);
+  const sessionUserId = useRef<string | null>(null);
   const [selectedInstitutionId, setSelectedInstitutionId] = useState<string | null>(
     () => readStorage(ACTIVE_INST_KEY),
   );
@@ -83,21 +88,34 @@ export function AuthProvider({
   );
 
   const refreshSession = useCallback(async () => {
+    const request = ++sessionRequest.current;
     try {
       const next = await gateway.getSession();
+      if (request !== sessionRequest.current) return;
+      const nextId = next?.user.id ?? null;
+      if (sessionUserId.current !== nextId) queryClient.clear();
+      sessionUserId.current = nextId;
       setSession(next);
-    } catch {
+      setSessionError(null);
+    } catch (error) {
+      if (request !== sessionRequest.current) return;
+      sessionUserId.current = null;
+      queryClient.clear();
       setSession(null);
+      setSessionError(error instanceof Error ? error.message : 'Unable to load your session.');
     } finally {
-      setIsLoading(false);
+      if (request === sessionRequest.current) setIsLoading(false);
     }
-  }, [gateway]);
+  }, [gateway, queryClient]);
 
   useEffect(() => {
     void refreshSession();
-    return gateway.onAuthStateChange(() => {
+    const requestRef = sessionRequest;
+    const unsubscribe = gateway.onAuthStateChange(() => {
+      setIsLoading(true);
       void refreshSession();
     });
+    return () => { requestRef.current++; unsubscribe(); };
   }, [gateway, refreshSession]);
 
   const activeMembership = useMemo<UserInstitutionMembership | null>(() => {
@@ -156,6 +174,10 @@ export function AuthProvider({
   const signInWithPassword = useCallback(
     async (input: SignInInput) => {
       const next = await gateway.signInWithPassword(input);
+      sessionRequest.current++;
+      sessionUserId.current = next.user.id;
+      setSessionError(null);
+      setIsLoading(false);
       setSession(next);
       const primaryInst = next.memberships[0]?.institutionId ?? null;
       setSelectedInstitutionId(primaryInst);
@@ -170,6 +192,10 @@ export function AuthProvider({
   const signUp = useCallback(async (input: SignUpInput) => {
     const next = await gateway.signUp(input);
     if (!next) return false;
+    sessionRequest.current++;
+    sessionUserId.current = next.user.id;
+    setSessionError(null);
+    setIsLoading(false);
     setSession(next);
     setSelectedInstitutionId(null);
     setActiveCampusId(null);
@@ -182,6 +208,10 @@ export function AuthProvider({
   const signInAsDemoUser = useCallback(
     async (userId: string) => {
       const next = await gateway.signInAsDemoUser(userId);
+      sessionRequest.current++;
+      sessionUserId.current = next.user.id;
+      setSessionError(null);
+      setIsLoading(false);
       setSession(next);
       const primaryInst = next.memberships[0]?.institutionId ?? null;
       setSelectedInstitutionId(primaryInst);
@@ -195,6 +225,10 @@ export function AuthProvider({
 
   const signOut = useCallback(async () => {
     await gateway.signOut();
+    sessionRequest.current++;
+    sessionUserId.current = null;
+    setSessionError(null);
+    setIsLoading(false);
     setSession(null);
     setSelectedInstitutionId(null);
     setActiveCampusId(null);
@@ -208,6 +242,7 @@ export function AuthProvider({
       gateway,
       session,
       isLoading,
+      sessionError,
       activeMembership,
       activeInstitution,
       activeRole,
@@ -225,6 +260,7 @@ export function AuthProvider({
       gateway,
       session,
       isLoading,
+      sessionError,
       activeMembership,
       activeInstitution,
       activeRole,

@@ -54,6 +54,21 @@ describe('account registration', () => {
     await user.click(screen.getByRole('button', { name: /create account/i }));
     expect(await screen.findByRole('heading', { name: /no active institutional assignment/i })).toBeInTheDocument();
   });
+  it('offers confirmation resend using the email field and shows delivery guidance', async () => {
+    const gateway = setupSupabase(); const resend = vi.spyOn(gateway, 'resendConfirmation').mockResolvedValue();
+    const user = userEvent.setup(); renderApp(gateway);
+    await user.type(await screen.findByLabelText(/institutional email/i), 'ADA@example.edu');
+    await user.click(screen.getByRole('button', { name: /resend confirmation email/i }));
+    expect(await screen.findByText(/if this address is eligible/i)).toBeInTheDocument();
+    expect(resend).toHaveBeenCalledWith('ada@example.edu');
+  });
+  it('shows a recoverable session loading error rather than silently redirecting', async () => {
+    const gateway = setupSupabase();
+    vi.mocked(gateway.getSession).mockRejectedValue(new Error('Profile missing'));
+    renderApp(gateway, '/');
+    expect(await screen.findByText('Profile missing')).toBeInTheDocument();
+    expect(screen.getByRole('button', {name: /try again/i})).toBeInTheDocument();
+  });
   it('explains that demo mode does not create real accounts', async () => {
     const db = new BadoLocalDatabase(`signup_demo_${crypto.randomUUID()}`);
     try {
