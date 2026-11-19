@@ -75,14 +75,14 @@ export function SyncQueuePage() {
         </Alert>
       )}
 
-      <Alert tone="warning" title="Automatic synchronisation is not yet available">
-        Queued changes remain on this device and are not uploaded automatically when connectivity returns. Requeueing only resets a failed item to pending; it does not transmit it. Keep this device and its browser data until a verified sync process is available.
+      <Alert tone="warning" title="Route sync is limited">
+        Supported route and depth records captured by the same signed-in user are sent when online. Failed items must be requeued; conflicts require review and cannot yet be resolved here. Photos, other asset operations and older records without capture-user information are not automatically uploaded. Keep this device and its browser data; Supabase integration testing is still required.
       </Alert>
       {errorMessage && <Alert tone="danger">{errorMessage}</Alert>}
 
       <Card
         title="Queued Field Operations"
-        description="Scoped strictly to the active institution. Conflicting updates are marked Requires Review and never overwrite institutional records silently."
+        description="Scoped strictly to the active institution. Route conflicts are marked Requires Review; unsupported records remain on this device."
       >
         {!queueItems || queueItems.length === 0 ? (
           <EmptyState

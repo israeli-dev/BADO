@@ -763,6 +763,18 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
+      replay_linear_route_mutation: {
+        Args: { p_mutation_id: string; p_institution_id: string; p_actor_id: string; p_asset_id: string; p_operation: string; p_payload: Json; p_base_version?: number | null };
+        Returns: Json;
+      };
+      create_linear_route_atomic: {
+        Args: { p_institution_id: string; p_asset: Json; p_vertices: Json; p_depths: Json; p_junctions: Json };
+        Returns: Json;
+      };
+      update_linear_route_atomic: {
+        Args: { p_institution_id: string; p_asset_id: string; p_update: Json; p_vertices: Json; p_junctions: Json; p_expected_version?: number | null };
+        Returns: Json;
+      };
       current_user_institution_ids: {
         Args: Record<string, never>;
         Returns: string[];

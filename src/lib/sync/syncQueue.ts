@@ -11,6 +11,7 @@ export interface EnqueueSyncInput {
   id?: string;
   institutionId: string;
   campusId?: string | null;
+  actorUserId?: string | null;
   recordType: string;
   recordId: string;
   operationType: SyncOperationType;
@@ -63,10 +64,16 @@ export async function enqueueSyncOperation(
       }
     }
 
+    const existingRows = await db.syncQueue.where('institutionId').equals(input.institutionId).toArray();
+    let queueOrder = Date.now() * 1000;
+    for (const row of existingRows) queueOrder = Math.max(queueOrder, (row.queueOrder ?? 0) + 1);
     const record: SyncQueueRecord = {
       id: mutationId,
       institutionId: input.institutionId,
       campusId: input.campusId ?? null,
+      actorUserId: input.actorUserId ?? null,
+      queueOrder,
+      claimId: null,
       recordType: input.recordType,
       recordId: input.recordId,
       operationType: input.operationType,

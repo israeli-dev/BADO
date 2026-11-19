@@ -23,7 +23,7 @@ export function DepthObservationForm({ assetId, geometry }: { assetId: string; g
     try {
       const snap = snapPointToLinearRoute(geometry, point);
       await add.mutateAsync({ assetId, latitude: snap.snapped.lat, longitude: snap.snapped.lng, chainageM: snap.chainageM, depthM: Number(depth), measurementMethod: method, documentedBeforeCovering: documented, notes, saveOffline: !online });
-      setMessage(`Depth observation saved at ${snap.chainageM.toFixed(1)} m chainage${online ? '.' : ' locally; sync is not yet verified.'}`);
+      setMessage(`Depth observation saved at ${snap.chainageM.toFixed(1)} m chainage${online ? '.' : ' locally; queued for the same signed-in user.'}`);
       setPoint(null); setDepth(''); setNotes(''); setDocumented(false);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not save observation.'); }
   }
