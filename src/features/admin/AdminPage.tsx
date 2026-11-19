@@ -19,6 +19,7 @@ import { LegendIcon } from '@/components/ui/LegendIcon';
 import { Select } from '@/components/ui/Select';
 import {
   useAuditLogs,
+  useAssignConfirmedMember,
   useCampuses,
   useCreateCampus,
   useCreateDepartment,
@@ -414,6 +415,13 @@ function DepartmentsSection() {
 function UsersSection() {
   const { data: members = [] } = useInstitutionMembers();
   const updateRole = useUpdateMemberRole();
+  const { gateway, can } = useAuth();
+  const { data: campuses = [] } = useCampuses();
+  const assignMember = useAssignConfirmedMember();
+  const [accountEmail, setAccountEmail] = useState('');
+  const [campusId, setCampusId] = useState('');
+  const [understandsScope, setUnderstandsScope] = useState(false);
+
   const [message, setMessage] = useState<{
     tone: 'success' | 'danger';
     text: string;
@@ -444,6 +452,19 @@ function UsersSection() {
     }
   };
 
+  const handleAssign = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setMessage(null);
+    try {
+      await assignMember.mutateAsync({ email: accountEmail, campusId });
+      setAccountEmail('');
+      setUnderstandsScope(false);
+      setMessage({ tone: 'success', text: 'Confirmed account assigned with a read-only role and selected campus. Ask the user to check their assignment.' });
+    } catch (error) {
+      setMessage({ tone: 'danger', text: error instanceof Error ? error.message : 'Member assignment failed.' });
+    }
+  };
+
   return (
     <Card
       title={`Authorised Institutional Personnel (${members.length})`}
@@ -453,6 +474,16 @@ function UsersSection() {
         <Alert tone={message.tone} className="mb-4">
           {message.text}
         </Alert>
+      )}
+      {gateway.mode === 'supabase' && can('admin:manage_users') && (
+        <form onSubmit={handleAssign} className="mb-6 space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <h3 className="text-sm font-semibold text-slate-900">Assign a confirmed account</h3>
+          <p className="text-xs text-slate-600">Verify the person and email independently before granting access. The account must already exist and have a confirmed email. Initial role is read-only; the selected campus restricts asset access, but other institution-wide records may be accessible. Only assign people trusted for the institution.</p>
+          <Input label="Account email" type="email" required value={accountEmail} onChange={(event) => setAccountEmail(event.target.value)} />
+          <Select label="Campus access" required value={campusId} onChange={(event) => setCampusId(event.target.value)} options={[{ value: '', label: 'Select a campus' }, ...campuses.filter(c => c.isActive).map(c => ({ value: c.id, label: c.name }))]} />
+          <label className="flex items-start gap-2 text-xs text-slate-700"><input type="checkbox" checked={understandsScope} onChange={(event) => setUnderstandsScope(event.target.checked)} /> I have verified this person and understand institution-wide data may be accessible.</label>
+          <Button type="submit" isLoading={assignMember.isPending} disabled={!campusId || !understandsScope}>Assign read-only access</Button>
+        </form>
       )}
       <div className="divide-y divide-slate-100">
         {members.map((member) => (

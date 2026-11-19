@@ -643,6 +643,10 @@ export class LocalDemoDataGateway implements BadoDataGateway {
     return updated;
   }
 
+  async assignConfirmedMember(): Promise<void> {
+    throw new Error('Real account assignment is unavailable in the simulated demo.');
+  }
+
   async updateMemberRole(
     institutionId: string,
     membershipId: string,

@@ -200,3 +200,19 @@ export function useUpdateMemberRole() {
     },
   });
 }
+
+export function useAssignConfirmedMember() {
+  const { gateway, activeInstitution } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ campusId, email }: { campusId: string; email: string }) => {
+      if (!activeInstitution) throw new Error('No active institution selected.');
+      return gateway.assignConfirmedMember(activeInstitution.id, campusId, email);
+    },
+    onSuccess: () => {
+      if (!activeInstitution) return;
+      void queryClient.invalidateQueries({ queryKey: institutionalKeys.members(activeInstitution.id) });
+      void queryClient.invalidateQueries({ queryKey: institutionalKeys.auditLogs(activeInstitution.id) });
+    },
+  });
+}
