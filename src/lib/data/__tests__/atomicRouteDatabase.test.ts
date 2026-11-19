@@ -5,6 +5,7 @@ import assets from '../../../../supabase/migrations/20261118000200_phase2_core_a
 import gis from '../../../../supabase/migrations/20261118000300_phase3_gis_and_linear_routes.sql?raw';
 import atomic from '../../../../supabase/migrations/20261118000400_atomic_route_writes.sql?raw';
 import replay from '../../../../supabase/migrations/20261118000500_idempotent_route_replay.sql?raw';
+import point from '../../../../supabase/migrations/20261118000600_atomic_point_assets.sql?raw';
 import { PGlite } from '@electric-sql/pglite';
 import { postgis } from '@electric-sql/pglite-postgis';
 import { BadoLocalDatabase } from '@/lib/db/badoDb';
@@ -41,7 +42,7 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       create schema storage; create table storage.buckets(id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
       create table storage.objects(id uuid, bucket_id text, name text);
       create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1, '/') $$;`);
-    for (const migration of [foundation, assets, gis, atomic, replay]) {
+    for (const migration of [foundation, assets, gis, atomic, replay, point]) {
       // PGlite provides gen_random_uuid natively, but not the pgcrypto extension package.
       await db.exec(migration.replace('create extension if not exists pgcrypto;', ''));
     }
@@ -55,6 +56,29 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       set role authenticated; select set_config('test.uid','${admin}',false);`);
   }, 60000);
   afterAll(async () => { await db?.close(); });
+  it('replays a point atomically and idempotently, including rollback on invalid benchmark', async () => {
+    const pointId = '10000000-0000-4000-8000-000000000091';
+    const mutation = '10000000-0000-4000-8000-000000000092';
+    const pointPayload = { ...assetPayload, id: pointId, asset_code: 'POINT-ONE', geom: 'SRID=4326;POINT(5.138 7.304)' };
+    const payload = { assetInsert: pointPayload, benchmarkInsert: null };
+    const sql = 'select public.replay_point_asset_mutation($1,$2,$3,$4,$5) as result';
+    const first = await db.query<{ result: { duplicate: boolean } }>(sql, [mutation, inst, admin, pointId, payload]);
+    expect(first.rows[0]?.result.duplicate).toBe(false);
+    const retry = await db.query<{ result: { duplicate: boolean } }>(sql, [mutation, inst, admin, pointId, payload]);
+    expect(retry.rows[0]?.result.duplicate).toBe(true);
+    await expect(db.query(sql, [mutation, inst, admin, pointId, { ...payload, assetInsert: { ...pointPayload, name: 'changed' } }])).rejects.toThrow();
+    const invalidId = '10000000-0000-4000-8000-000000000093';
+    const invalidMutation = '10000000-0000-4000-8000-000000000094';
+    const invalid = { assetInsert: { ...pointPayload, id: invalidId, asset_code: 'POINT-TWO', category: 'survey_reference' }, benchmarkInsert: null };
+    await expect(db.query(sql, [invalidMutation, inst, admin, invalidId, invalid])).rejects.toThrow();
+    const rows = await db.query('select id from public.assets where id = $1', [invalidId]);
+    expect(rows.rows).toHaveLength(0);
+    const ledger = await db.query('select mutation_id from public.sync_idempotency_ledger where mutation_id = $1', [invalidMutation]);
+    expect(ledger.rows).toHaveLength(0);
+    await db.exec(`select set_config('test.uid','${reader}',false)`);
+    await expect(db.query(sql, ['10000000-0000-4000-8000-000000000095', inst, reader, invalidId, { assetInsert: { ...pointPayload, id: invalidId, asset_code: 'POINT-THREE' }, benchmarkInsert: null }])).rejects.toThrow();
+    await db.exec(`select set_config('test.uid','${admin}',false)`);
+  });
   it('rolls back the whole create when a child fails and preserves RLS', async () => {
     const invalid = [{ ...vertices[0], vertex_kind: 'invalid' }, vertices[1]];
     await expect(db.query('select public.create_linear_route_atomic($1,$2,$3,$4,$5)', [inst, assetPayload, invalid, [], []])).rejects.toThrow();

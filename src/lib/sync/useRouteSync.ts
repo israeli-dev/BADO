@@ -6,7 +6,7 @@ import { badoDb } from '@/lib/db/badoDb';
 import { processRouteQueue, replayRouteToSupabase } from '@/lib/sync/routeReplay';
 import { useOnlineStatus } from '@/lib/sync/useOnlineStatus';
 
-/** Replay only supported route mutations for the active authenticated user. */
+/** Replay supported asset mutations for the active authenticated user. */
 export function useRouteSync(): void {
   const { gateway, activeInstitution, session } = useAuth();
   const online = useOnlineStatus();
@@ -37,7 +37,7 @@ export function useRouteSync(): void {
         if (done && active) await queryClient.invalidateQueries({ queryKey: ['institution', institutionId] });
       } catch (error) {
         // Local IndexedDB failures are not remote acknowledgements; leave entries intact.
-        console.error('Route queue could not be processed:', error);
+        console.error('Sync queue could not be processed:', error);
       } finally { running.current = false; }
     };
     runRef.current = () => void run();
