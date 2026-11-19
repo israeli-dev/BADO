@@ -77,3 +77,5 @@ npm run build       # Production bundle build
 - [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md)
 
 Migration `20261118000800_asset_child_media_scope.sql` narrows asset-related child records and Storage access to the parent asset and campus. Review existing media paths before rollout: only paths in the format `institution/campus/asset/photos|docs/filename` are accessible under these policies; legacy paths may require an administrator-led migration. Other institution-wide data and any additional project-specific permissive policies still require review.
+
+Offline replay hardening requires migration `20261118000900_harden_replay_receipts.sql`. It creates a dedicated non-login role and protects new replay receipts while retaining caller RLS. Previously client-writable ledger keys are not trusted; outstanding queue items using those keys require manual reconciliation, not blind retries. Verify role creation, privileges, RLS and full retry behavior in staging before production.
