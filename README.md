@@ -45,6 +45,12 @@ cp .env.example .env   # Leave Supabase vars blank for Simulated Demo Mode, or p
 npm run dev
 ```
 
+### Account sign-up and institutional access
+
+The sign-in page links to **Create an account** in Supabase mode. Enable email/password sign-up in the Supabase Auth provider settings if your organisation wants self-registration; the repository's local Supabase config keeps sign-up disabled by default. Enable email confirmation and configure the Site URL and allowed redirect URLs, including your deployed app's `/login` URL (and your local development `/login` URL when needed). Configure production email delivery and appropriate rate limits before inviting users. Changes to `supabase/config.toml` do not automatically change hosted project Auth settings.
+
+Creating an account **does not** grant access to an institution or a role. A trusted administrator must verify the user and provision an active `user_institutions` membership. The current administration UI can manage existing memberships but does not yet invite or assign new users; initial provisioning requires a trusted administrative workflow. Never allow users to assign their own institution or role. In demo mode, use the labelled simulated accounts; no real account is created.
+
 ### Applying Database Migrations to Supabase
 Apply the ordered SQL migrations in `supabase/migrations/` (`20261118000100_phase1_institutional_foundation.sql` followed by `20261118000200_phase2_core_asset_registry.sql`) via the Supabase CLI (`supabase db push`) or the Supabase SQL Editor. Optional fictional training records are provided in `supabase/seed.sql`.
 

@@ -267,6 +267,10 @@ export class LocalDemoDataGateway implements BadoDataGateway {
     );
   }
 
+  async signUp(): Promise<AuthSessionState | null> {
+    throw new Error('Account registration is unavailable in demo mode. Connect Supabase to create an account.');
+  }
+
   async signInAsDemoUser(userId: string): Promise<AuthSessionState> {
     const session = await this.hydrateSessionForUser(userId);
     if (!session || session.memberships.length === 0) {

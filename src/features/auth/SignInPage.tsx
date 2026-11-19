@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Alert } from '@/components/ui/Alert';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -156,6 +156,10 @@ export function SignInPage() {
                 </Button>
               </form>
 
+              <p className="mt-4 text-center text-sm text-slate-600">
+                Need an account?{' '}
+                <Link to="/signup" state={location.state} className="font-semibold text-bado-navy-800 underline underline-offset-2">Create an account</Link>
+              </p>
               <div className="mt-5 border-t border-slate-100 pt-4 text-xs text-slate-600 space-y-2">
                 <div className="flex items-start gap-2">
                   <ShieldCheck
@@ -163,8 +167,7 @@ export function SignInPage() {
                     aria-hidden="true"
                   />
                   <p>
-                    Accounts are provisioned by your university&apos;s Works &amp;
-                    Maintenance Administrator. Data is isolated per institution
+                    Your university administrator assigns institutional access after account creation. Data is isolated per institution
                     through PostgreSQL Row Level Security.
                   </p>
                 </div>

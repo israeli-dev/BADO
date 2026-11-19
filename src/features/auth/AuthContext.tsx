@@ -12,6 +12,7 @@ import {
   dataGateway as defaultDataGateway,
   type FoundationDataGateway,
   type SignInInput,
+  type SignUpInput,
 } from '@/lib/data';
 import { roleHasPermission, type Permission } from '@/lib/permissions/rbac';
 import type {
@@ -33,6 +34,7 @@ export interface AuthContextValue {
   selectCampus: (campusId: string | null) => void;
   can: (permission: Permission) => boolean;
   signInWithPassword: (input: SignInInput) => Promise<void>;
+  signUp: (input: SignUpInput) => Promise<boolean>;
   signInAsDemoUser: (userId: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshSession: () => Promise<void>;
@@ -165,6 +167,18 @@ export function AuthProvider({
     [gateway, queryClient],
   );
 
+  const signUp = useCallback(async (input: SignUpInput) => {
+    const next = await gateway.signUp(input);
+    if (!next) return false;
+    setSession(next);
+    setSelectedInstitutionId(null);
+    setActiveCampusId(null);
+    writeStorage(ACTIVE_INST_KEY, null);
+    writeStorage(ACTIVE_CAMPUS_KEY, null);
+    queryClient.clear();
+    return true;
+  }, [gateway, queryClient]);
+
   const signInAsDemoUser = useCallback(
     async (userId: string) => {
       const next = await gateway.signInAsDemoUser(userId);
@@ -202,6 +216,7 @@ export function AuthProvider({
       selectCampus,
       can,
       signInWithPassword,
+      signUp,
       signInAsDemoUser,
       signOut,
       refreshSession,
@@ -218,6 +233,7 @@ export function AuthProvider({
       selectCampus,
       can,
       signInWithPassword,
+      signUp,
       signInAsDemoUser,
       signOut,
       refreshSession,
