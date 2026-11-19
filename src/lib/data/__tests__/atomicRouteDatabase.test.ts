@@ -9,6 +9,7 @@ import point from '../../../../supabase/migrations/20261118000600_atomic_point_a
 import assignment from '../../../../supabase/migrations/20261118000700_assign_confirmed_member.sql?raw';
 import childScope from '../../../../supabase/migrations/20261118000800_asset_child_media_scope.sql?raw';
 import hardened from '../../../../supabase/migrations/20261118000900_harden_replay_receipts.sql?raw';
+import digCheck from '../../../../supabase/migrations/20261118001000_check_before_dig.sql?raw';
 import { PGlite } from '@electric-sql/pglite';
 import { postgis } from '@electric-sql/pglite-postgis';
 import { BadoLocalDatabase } from '@/lib/db/badoDb';
@@ -45,7 +46,7 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       create schema storage; create table storage.buckets(id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
       create table storage.objects(id uuid, bucket_id text, name text);
       create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1, '/') $$;`);
-    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope, hardened]) {
+    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope, hardened, digCheck]) {
       // PGlite provides gen_random_uuid natively, but not the pgcrypto extension package.
       await db.exec(migration.replace('create extension if not exists pgcrypto;', ''));
     }
@@ -64,6 +65,23 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       set role authenticated; select set_config('test.uid','${admin}',false);`);
   }, 60000);
   afterAll(async () => { await db?.close(); });
+  it('checks actual route geometry under caller RLS and validates inputs', async () => {
+    const routeId = '10000000-0000-4000-8000-000000000099';
+    await db.exec(`reset role;
+      insert into public.assets(id,institution_id,campus_id,asset_type_id,asset_code,name,category,utility_group,geom,verification_status,created_by)
+      values ('${routeId}','${inst}','${campus}','${type}','DIG-TEST','Dig test route','underground','water',st_geomfromtext('LINESTRING(5.138 7.304,5.139 7.304)',4326),'submitted','${admin}');
+      set role authenticated; select set_config('test.uid','${reader}',false);`);
+    const sql = 'select public.check_before_dig($1,$2,$3::jsonb,$4) as report';
+    const pt = JSON.stringify({type:'Point',coordinates:[5.1385,7.304]});
+    const result = await db.query<{report: {results: {id: string, distanceM: number}[], truncated: boolean}}>(sql, [inst,campus,pt,5]);
+    expect(result.rows[0]!.report.results.some(r => r.id === routeId && r.distanceM < 1)).toBe(true);
+    expect(result.rows[0]!.report.truncated).toBe(false);
+    const polygon = JSON.stringify({type:'Polygon',coordinates:[[[5.1384,7.3039],[5.1386,7.3039],[5.1386,7.3041],[5.1384,7.3041],[5.1384,7.3039]]]});
+    expect((await db.query<{report:{results:{id:string}[]}}>(sql,[inst,campus,polygon,0])).rows[0]!.report.results.some(r=>r.id===routeId)).toBe(true);
+    await expect(db.query(sql,[inst,campus,pt,501])).rejects.toThrow(/Invalid/);
+    await expect(db.query(sql,[inst,'10000000-0000-4000-8000-000000000123',pt,5])).rejects.toThrow(/accessible/);
+    await db.exec(`reset role; select set_config('test.uid','${admin}',false); update public.assets set archived_at=now() where id='${routeId}'; set role authenticated;`);
+  });
   it('allows only an institution admin to assign a confirmed account as campus-scoped read-only, without replacing existing membership', async () => {
     const target = '10000000-0000-4000-8000-000000000081';
     const unconfirmed = '10000000-0000-4000-8000-000000000082';

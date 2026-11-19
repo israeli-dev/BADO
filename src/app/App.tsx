@@ -37,6 +37,8 @@ const SyncQueuePage = lazy(() =>
 const InfrastructureMapPage = lazy(() => import('@/features/map/InfrastructureMapPage').then(m => ({ default: m.InfrastructureMapPage })));
 const LinearRoutePage = lazy(() => import('@/features/routes/LinearRoutePage').then(m => ({ default: m.LinearRoutePage })));
 
+const DigCheckPage = lazy(() => import('@/features/digCheck/DigCheckPage').then(m => ({ default: m.DigCheckPage })));
+
 function RouteLoadingFallback() {
   return (
     <div role="status" className="py-12 text-center text-sm text-slate-600">
@@ -101,17 +103,7 @@ export function AppRoutes() {
           path="dig-check"
           element={
             <ProtectedRoute requiredPermission="dig_check:run">
-              <PlannedModulePage
-                title="Check Before You Dig"
-                phaseLabel="Phase 4"
-                summary="Spatial intersection and awareness-buffer analysis for proposed excavation sites."
-                showExcavationNotice
-                plannedCapabilities={[
-                  'Select a point or draw a proposed excavation polygon with a configurable awareness buffer.',
-                  'PostGIS geography queries measuring distance against actual pipeline and cable route geometries.',
-                  'Structured proximity report showing utility type, recorded depths, verification status, last update, and photos.',
-                ]}
-              />
+              <DigCheckPage />
             </ProtectedRoute>
           }
         />

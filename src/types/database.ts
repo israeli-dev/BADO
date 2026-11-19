@@ -763,6 +763,7 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
+      check_before_dig: { Args: { p_institution_id: string; p_campus_id: string; p_geometry: Json; p_buffer_m: number }; Returns: Json };
       assign_confirmed_member: { Args: { p_institution_id: string; p_campus_id: string; p_email: string }; Returns: string };
       create_point_asset_atomic: { Args: { p_institution_id: string; p_asset: Json; p_benchmark: Json }; Returns: Json };
       replay_point_asset_mutation: { Args: { p_mutation_id: string; p_institution_id: string; p_actor_id: string; p_asset_id: string; p_payload: Json }; Returns: Json };

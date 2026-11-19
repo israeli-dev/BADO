@@ -1,3 +1,4 @@
+import type { DigCheckInput, DigCheckReport } from '@/lib/digCheck/digCheck';
 import { z } from 'zod';
 import type {
   AddDepthObservationInput,
@@ -170,6 +171,8 @@ export interface BadoDataGateway {
   signInAsDemoUser(userId: string): Promise<AuthSessionState>;
   signOut(): Promise<void>;
   onAuthStateChange(listener: () => void): () => void;
+
+  checkBeforeDig(institutionId: string, input: DigCheckInput): Promise<DigCheckReport>;
 
   // Institutional reads
   listCampuses(institutionId: string): Promise<Campus[]>;
