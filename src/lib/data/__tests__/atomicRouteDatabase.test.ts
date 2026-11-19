@@ -8,6 +8,7 @@ import replay from '../../../../supabase/migrations/20261118000500_idempotent_ro
 import point from '../../../../supabase/migrations/20261118000600_atomic_point_assets.sql?raw';
 import assignment from '../../../../supabase/migrations/20261118000700_assign_confirmed_member.sql?raw';
 import childScope from '../../../../supabase/migrations/20261118000800_asset_child_media_scope.sql?raw';
+import hardened from '../../../../supabase/migrations/20261118000900_harden_replay_receipts.sql?raw';
 import { PGlite } from '@electric-sql/pglite';
 import { postgis } from '@electric-sql/pglite-postgis';
 import { BadoLocalDatabase } from '@/lib/db/badoDb';
@@ -44,7 +45,7 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       create schema storage; create table storage.buckets(id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
       create table storage.objects(id uuid, bucket_id text, name text);
       create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1, '/') $$;`);
-    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope]) {
+    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope, hardened]) {
       // PGlite provides gen_random_uuid natively, but not the pgcrypto extension package.
       await db.exec(migration.replace('create extension if not exists pgcrypto;', ''));
     }
@@ -53,6 +54,8 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       alter table storage.objects force row level security;
       grant select, insert on storage.objects to authenticated;
       grant select, insert, update, delete on all tables in schema public to authenticated;
+      revoke insert, update, delete on public.sync_idempotency_ledger from authenticated;
+      revoke all on public.sync_replay_receipts from authenticated;
       insert into auth.users (id,email) values ('${admin}','admin@test.example'), ('${reader}','reader@test.example');
       insert into public.institutions (id,name,slug,short_code) values ('${inst}','Test Institution','test-inst','TEST');
       insert into public.campuses (id,institution_id,name,code) values ('${campus}','${inst}','Main campus','MAIN');
@@ -127,6 +130,47 @@ describe('atomic route writes with PostgreSQL RLS', () => {
     await db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2)", [crypto.randomUUID(), `${inst}/${campus}/${visibleAsset}/photos/allowed.jpg`]);
     await db.exec(`select set_config('test.uid','${admin}',false)`);
   });
+  it('prevents direct receipt fabrication and refuses to trust legacy keys', async () => {
+    const legacyId = '40000000-0000-4000-8000-000000000001';
+    const target = '40000000-0000-4000-8000-000000000002';
+    const payload = { assetInsert: { ...assetPayload, id: target, asset_code: 'LEGACY-POINT', geom: 'SRID=4326;POINT(5.138 7.304)' }, benchmarkInsert: null };
+    const insertSql = "insert into public.sync_idempotency_ledger(mutation_id,institution_id,user_id,entity_type,entity_id,operation,response_snapshot) values ($1,$2,$3,'point_assets',$4,'create', '{}')";
+    await expect(db.query(insertSql, [legacyId, inst, admin, target])).rejects.toThrow();
+    await expect(db.query("insert into public.sync_replay_receipts(mutation_id,institution_id,user_id,entity_type,entity_id,operation,response_snapshot) values ($1,$2,$3,'point_assets',$4,'create','{}')", [legacyId, inst, admin, target])).rejects.toThrow();
+    await expect(db.query('select * from public.sync_replay_receipts')).rejects.toThrow();
+    await expect(db.query("update public.sync_replay_receipts set response_snapshot='{}'" )).rejects.toThrow();
+    await expect(db.query('select public.replay_linear_route_mutation($1,$2,$3,$4,$5,$6,$7)', [legacyId, inst, admin, target, null, {}, null])).rejects.toThrow(/Invalid route replay request/);
+    const membership = await db.query<{ can_assume: boolean }>("select pg_has_role('authenticated', 'bado_sync_replay', 'MEMBER') as can_assume");
+    expect(membership.rows[0]?.can_assume).toBe(false);
+    await db.exec('reset role');
+    const flags = await db.query<{ rolcanlogin: boolean; rolsuper: boolean; rolbypassrls: boolean }>("select rolcanlogin, rolsuper, rolbypassrls from pg_roles where rolname='bado_sync_replay'");
+    expect(flags.rows[0]).toEqual({ rolcanlogin: false, rolsuper: false, rolbypassrls: false });
+    await db.query(insertSql, [legacyId, inst, admin, target]);
+    await db.exec(`set role authenticated; select set_config('test.uid','${admin}',false);`);
+    await expect(db.query('select public.replay_point_asset_mutation($1,$2,$3,$4,$5)', [legacyId, inst, admin, target, payload])).rejects.toMatchObject({ code: '40001' });
+    expect((await db.query('select id from public.assets where id=$1', [target])).rows).toHaveLength(0);
+    await db.exec('reset role');
+    expect((await db.query('select mutation_id from public.sync_replay_receipts where mutation_id=$1', [legacyId])).rows).toHaveLength(0);
+    await db.exec('set role authenticated');
+  });
+  it('enforces the original actor and campus RLS inside privileged replay entry points', async () => {
+    const tech = '10000000-0000-4000-8000-000000000102';
+    const campus2 = '10000000-0000-4000-8000-000000000101';
+    const target = '40000000-0000-4000-8000-000000000003';
+    const mutation = '40000000-0000-4000-8000-000000000004';
+    const point = { ...assetPayload, id: target, campus_id: campus2, asset_code: 'CROSS-CAMPUS', geom: 'SRID=4326;POINT(5.138 7.304)' };
+    const sql = 'select public.replay_point_asset_mutation($1,$2,$3,$4,$5) as result';
+    await db.exec(`select set_config('test.uid','${tech}',false)`);
+    await expect(db.query(sql, [mutation, inst, admin, target, { assetInsert: point, benchmarkInsert: null }])).rejects.toThrow(/original capture user/);
+    await expect(db.query(sql, [mutation, inst, tech, target, { assetInsert: point, benchmarkInsert: null }])).rejects.toThrow();
+    await db.exec('reset role');
+    expect((await db.query('select mutation_id from public.sync_replay_receipts where mutation_id=$1', [mutation])).rows).toHaveLength(0);
+    await db.exec('set role authenticated');
+    const allowed = { ...point, campus_id: campus, asset_code: 'TECH-POINT' };
+    expect((await db.query<{ result: { duplicate: boolean } }>(sql, [mutation, inst, tech, target, { assetInsert: allowed, benchmarkInsert: null }])).rows[0]?.result.duplicate).toBe(false);
+    expect((await db.query<{ result: { duplicate: boolean } }>(sql, [mutation, inst, tech, target, { assetInsert: allowed, benchmarkInsert: null }])).rows[0]?.result.duplicate).toBe(true);
+    await db.exec(`select set_config('test.uid','${admin}',false)`);
+  });
   it('replays a point atomically and idempotently, including rollback on invalid benchmark', async () => {
     const pointId = '10000000-0000-4000-8000-000000000091';
     const mutation = '10000000-0000-4000-8000-000000000092';
@@ -144,8 +188,10 @@ describe('atomic route writes with PostgreSQL RLS', () => {
     await expect(db.query(sql, [invalidMutation, inst, admin, invalidId, invalid])).rejects.toThrow();
     const rows = await db.query('select id from public.assets where id = $1', [invalidId]);
     expect(rows.rows).toHaveLength(0);
-    const ledger = await db.query('select mutation_id from public.sync_idempotency_ledger where mutation_id = $1', [invalidMutation]);
-    expect(ledger.rows).toHaveLength(0);
+    await db.exec('reset role');
+    const receipt = await db.query('select mutation_id from public.sync_replay_receipts where mutation_id = $1', [invalidMutation]);
+    expect(receipt.rows).toHaveLength(0);
+    await db.exec('set role authenticated');
     await db.exec(`select set_config('test.uid','${reader}',false)`);
     await expect(db.query(sql, ['10000000-0000-4000-8000-000000000095', inst, reader, invalidId, { assetInsert: { ...pointPayload, id: invalidId, asset_code: 'POINT-THREE' }, benchmarkInsert: null }])).rejects.toThrow();
     await db.exec(`select set_config('test.uid','${admin}',false)`);
@@ -197,8 +243,10 @@ describe('atomic route writes with PostgreSQL RLS', () => {
     const mutationId = '20000000-0000-4000-8000-000000000006';
     const update = { assetUpdate: { geom: 'SRID=4326;LINESTRING(5.138 7.304,5.14 7.304)' }, routeVertexInserts: vertices, junctionInserts: null };
     await expect(db.query('select public.replay_linear_route_mutation($1,$2,$3,$4,$5,$6,$7)', [mutationId, inst, admin, asset, 'update', update, 1])).rejects.toThrow(/changed or is no longer accessible/);
-    const result = await db.query<{ n: number }>('select count(*)::int n from public.sync_idempotency_ledger where mutation_id=$1', [mutationId]);
+    await db.exec('reset role');
+    const result = await db.query<{ n: number }>('select count(*)::int n from public.sync_replay_receipts where mutation_id=$1', [mutationId]);
     expect(result.rows[0]?.n).toBe(0);
+    await db.exec('set role authenticated');
   });
 
   it('retries a lost response end-to-end without duplicating the server route', async () => {
