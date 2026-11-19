@@ -132,6 +132,7 @@ export interface UploadAssetDocumentInput {
   documentKind: DocumentKind;
   title: string;
   description?: string;
+  saveOffline?: boolean;
 }
 
 export interface BenchmarkReferenceOption {

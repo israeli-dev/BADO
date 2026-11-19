@@ -55,6 +55,17 @@ describe('offline route replay', () => {
     expect(await processRouteQueue(institutionId, actorUserId, replay)).toBe(2);
     expect(replay.mock.calls.slice(1).map(call => call[2])).toEqual(['point', 'photo']);
   });
+  it('blocks a document until the asset create succeeds', async () => {
+    const create = await enqueueSyncOperation({ institutionId, actorUserId, recordType: 'assets', recordId: 'point-1', operationType: 'create', payload: { assetInsert: { id: 'point-1' } } });
+    const document = await enqueueSyncOperation({ institutionId, actorUserId, recordType: 'asset_documents', recordId: 'doc-1', operationType: 'upload_document', payload: { meta: { assetId: 'point-1' } } });
+    const replay = vi.fn().mockRejectedValueOnce(new Error('offline'));
+    await processRouteQueue(institutionId, actorUserId, replay);
+    expect((await badoDb.syncQueue.get(document.id))?.status).toBe('pending');
+    await badoDb.syncQueue.update(create.id, { status: 'pending' });
+    replay.mockResolvedValue(undefined);
+    expect(await processRouteQueue(institutionId, actorUserId, replay)).toBe(2);
+    expect(replay.mock.calls.slice(1).map(call => call[2])).toEqual(['point', 'document']);
+  });
   it('recovers a stale lease using the same mutation ID', async () => {
     const item = await enqueue('route-1');
     const claim = await claimNextRouteMutation(institutionId, actorUserId);

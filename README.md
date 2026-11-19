@@ -27,7 +27,7 @@ BADO is a mobile-first, offline-first infrastructure documentation, GIS mapping,
 - **Phase 4:** Check Before You Dig spatial query and excavation buffer workflow.
 - **Phase 5:** BADO Live foreground GPS proximity awareness and offline cached awareness.
 - **Phase 6:** Borehole Passport, unified inspections/maintenance history, QR generation/scanning, and printable labels.
-- **Phase 7:** Full PWA service worker, broader offline operations, automated background synchronisation and conflict resolution UI. Foreground replay covers newly captured points, routes, depth observations and photos; see `docs/LINEAR_MAPPING.md` for limitations.
+- **Phase 7:** Full PWA service worker, broader offline operations, automated background synchronisation and conflict resolution UI. Foreground replay covers newly captured points, routes, depth observations, photos and documents; see `docs/LINEAR_MAPPING.md` for limitations.
 - **Phase 8–9:** Institutional CSV/GeoJSON/PDF reports, QGIS desktop connection guide, E2E testing, and production deployment hardening.
 
 ---

@@ -66,7 +66,7 @@ export function AssetDetailPage() {
   const { assetId } = useParams<{ assetId: string }>();
   const navigate = useNavigate();
   const isOnline = useOnlineStatus();
-  const { session, activeRole, can } = useAuth();
+  const { session, activeRole, can, gateway } = useAuth();
 
   const { data: detail, isLoading, error } = useAssetDetail(assetId);
   const submitDraft = useSubmitDraftAsset();
@@ -236,7 +236,7 @@ export function AssetDetailPage() {
     if (!photoFile) return;
     setFeedback(null);
     try {
-      await uploadPhoto.mutateAsync({
+      const result = await uploadPhoto.mutateAsync({
         assetId: asset.id,
         file: photoFile,
         photoKind,
@@ -247,7 +247,7 @@ export function AssetDetailPage() {
       setPhotoCaption('');
       setFeedback({
         tone: 'success',
-        message: 'Photograph compressed and attached to asset record.',
+        message: result.localBlobId && gateway.mode === 'supabase' ? 'Photograph saved on this device and queued for synchronisation.' : 'Photograph compressed and attached to asset record.',
       });
     } catch (err) {
       setFeedback({
@@ -262,17 +262,18 @@ export function AssetDetailPage() {
     if (!docFile) return;
     setFeedback(null);
     try {
-      await uploadDocument.mutateAsync({
+      const result = await uploadDocument.mutateAsync({
         assetId: asset.id,
         file: docFile,
         documentKind: docKind,
         title: docTitle || docFile.name,
+        saveOffline: !isOnline,
       });
       setDocFile(null);
       setDocTitle('');
       setFeedback({
         tone: 'success',
-        message: 'Technical document attached to asset record.',
+        message: result.localBlobId && gateway.mode === 'supabase' ? 'Document saved on this device and queued for synchronisation.' : 'Technical document attached to asset record.',
       });
     } catch (err) {
       setFeedback({
