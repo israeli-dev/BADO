@@ -6,6 +6,8 @@ import gis from '../../../../supabase/migrations/20261118000300_phase3_gis_and_l
 import atomic from '../../../../supabase/migrations/20261118000400_atomic_route_writes.sql?raw';
 import replay from '../../../../supabase/migrations/20261118000500_idempotent_route_replay.sql?raw';
 import point from '../../../../supabase/migrations/20261118000600_atomic_point_assets.sql?raw';
+import assignment from '../../../../supabase/migrations/20261118000700_assign_confirmed_member.sql?raw';
+import childScope from '../../../../supabase/migrations/20261118000800_asset_child_media_scope.sql?raw';
 import { PGlite } from '@electric-sql/pglite';
 import { postgis } from '@electric-sql/pglite-postgis';
 import { BadoLocalDatabase } from '@/lib/db/badoDb';
@@ -37,16 +39,19 @@ describe('atomic route writes with PostgreSQL RLS', () => {
   beforeAll(async () => {
     db = await PGlite.create({ extensions: { postgis } });
     await db.exec(`create role authenticated; create role anon; create schema auth;
-      create table auth.users(id uuid primary key, email text, raw_user_meta_data jsonb);
+      create table auth.users(id uuid primary key, email text, raw_user_meta_data jsonb, email_confirmed_at timestamptz);
       create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('test.uid', true),'')::uuid $$;
       create schema storage; create table storage.buckets(id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
       create table storage.objects(id uuid, bucket_id text, name text);
       create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1, '/') $$;`);
-    for (const migration of [foundation, assets, gis, atomic, replay, point]) {
+    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope]) {
       // PGlite provides gen_random_uuid natively, but not the pgcrypto extension package.
       await db.exec(migration.replace('create extension if not exists pgcrypto;', ''));
     }
-    await db.exec(`grant usage on schema public, auth to authenticated;
+    await db.exec(`grant usage on schema public, auth, storage to authenticated;
+      alter table storage.objects enable row level security;
+      alter table storage.objects force row level security;
+      grant select, insert on storage.objects to authenticated;
       grant select, insert, update, delete on all tables in schema public to authenticated;
       insert into auth.users (id,email) values ('${admin}','admin@test.example'), ('${reader}','reader@test.example');
       insert into public.institutions (id,name,slug,short_code) values ('${inst}','Test Institution','test-inst','TEST');
@@ -56,6 +61,72 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       set role authenticated; select set_config('test.uid','${admin}',false);`);
   }, 60000);
   afterAll(async () => { await db?.close(); });
+  it('allows only an institution admin to assign a confirmed account as campus-scoped read-only, without replacing existing membership', async () => {
+    const target = '10000000-0000-4000-8000-000000000081';
+    const unconfirmed = '10000000-0000-4000-8000-000000000082';
+    const otherInstitution = '10000000-0000-4000-8000-000000000083';
+    const otherCampus = '10000000-0000-4000-8000-000000000084';
+    await db.exec(`reset role;
+      insert into auth.users(id,email,email_confirmed_at) values ('${target}','new@test.example',now()), ('${unconfirmed}','unconfirmed@test.example',null);
+      insert into public.institutions(id,name,slug,short_code) values ('${otherInstitution}','Other Institution','other-test','OTHER');
+      insert into public.campuses(id,institution_id,name,code) values ('${otherCampus}','${otherInstitution}','Other campus','OTHER');
+      set role authenticated; select set_config('test.uid','${reader}',false);`);
+    const sql = 'select public.assign_confirmed_member($1,$2,$3) as id';
+    await expect(db.query(sql, [inst, campus, 'new@test.example'])).rejects.toThrow(/administrator/);
+    await db.exec(`select set_config('test.uid','${admin}',false)`);
+    await expect(db.query(sql, [otherInstitution, otherCampus, 'new@test.example'])).rejects.toThrow(/administrator/);
+    await expect(db.query(sql, [inst, otherCampus, 'new@test.example'])).rejects.toThrow(/active campus/);
+    await expect(db.query(sql, [inst, campus, 'unconfirmed@test.example'])).rejects.toThrow(/confirmed account/);
+    await expect(db.query(sql, [inst, campus, 'missing@test.example'])).rejects.toThrow(/confirmed account/);
+    const result = await db.query<{ id: string }>(sql, [inst, campus, ' NEW@test.example ']);
+    const member = await db.query<{ role: string; allowed_campus_ids: string[]; invited_by: string }>('select role, allowed_campus_ids, invited_by from public.user_institutions where id=$1', [result.rows[0]?.id]);
+    expect(member.rows[0]).toMatchObject({ role: 'read_only', allowed_campus_ids: [campus], invited_by: admin });
+    await expect(db.query(sql, [inst, campus, 'new@test.example'])).rejects.toThrow(/already has a membership/);
+    const audit = await db.query<{ n: number }>("select count(*)::int n from public.audit_logs where entity_type='user_institutions' and entity_id=$1 and actor_user_id=$2 and action='insert'", [result.rows[0]?.id, admin]);
+    expect(audit.rows[0]?.n).toBe(1);
+  });
+  it('enforces parent campus and draft visibility for child records and media paths', async () => {
+    const campus2 = '10000000-0000-4000-8000-000000000101';
+    const tech = '10000000-0000-4000-8000-000000000102';
+    const visibleAsset = '10000000-0000-4000-8000-000000000103';
+    const otherAsset = '10000000-0000-4000-8000-000000000104';
+    const draftAsset = '10000000-0000-4000-8000-000000000105';
+    await db.exec(`reset role;
+      insert into auth.users(id,email) values ('${tech}','tech@test.example');
+      insert into public.campuses(id,institution_id,name,code) values ('${campus2}','${inst}','Second campus','SECOND');
+      update public.user_institutions set allowed_campus_ids=array['${campus}'::uuid] where user_id='${reader}';
+      insert into public.user_institutions(user_id,institution_id,role,allowed_campus_ids) values ('${tech}','${inst}','field_technician',array['${campus}'::uuid]);
+      set role authenticated; select set_config('test.uid','${admin}',false);`);
+    for (const [assetId, campusId, status, code] of [[visibleAsset, campus, 'submitted', 'SCOPE-A'], [otherAsset, campus2, 'submitted', 'SCOPE-B'], [draftAsset, campus, 'draft', 'SCOPE-C']]) {
+      const payload = { ...assetPayload, id: assetId, campus_id: campusId, asset_code: code, verification_status: status };
+      const routeVertices = vertices.map((v) => ({ ...v, id: crypto.randomUUID(), asset_id: assetId }));
+      await db.query('select public.create_linear_route_atomic($1,$2,$3,$4,$5)', [inst, payload, routeVertices, [], []]);
+      const photoPath = `${inst}/${campusId}/${assetId}/photos/test.jpg`;
+      const docPath = `${inst}/${campusId}/${assetId}/docs/test.pdf`;
+      await db.query("insert into public.asset_photos(id,institution_id,asset_id,storage_path,file_name,mime_type,file_size_bytes,photo_kind) values ($1,$2,$3,$4,'test.jpg','image/jpeg',3,'other')", [crypto.randomUUID(), inst, assetId, photoPath]);
+      await db.query("insert into public.asset_documents(id,institution_id,asset_id,storage_path,file_name,mime_type,file_size_bytes,title) values ($1,$2,$3,$4,'test.pdf','application/pdf',3,'Test')", [crypto.randomUUID(), inst, assetId, docPath]);
+      await db.query("insert into public.asset_observations(id,institution_id,asset_id,geom) values ($1,$2,$3,'SRID=4326;POINT(5.138 7.304)')", [crypto.randomUUID(), inst, assetId]);
+      await db.query("insert into public.survey_benchmarks(asset_id,institution_id,reference_code,monument_type,vertical_datum,horizontal_crs,survey_method) values ($1,$2,$3,'Concrete','Datum','EPSG:4326','Survey')", [assetId, inst, code]);
+      await db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2),($3,'asset-documents',$4)", [crypto.randomUUID(), photoPath, crypto.randomUUID(), docPath]);
+    }
+    await db.exec(`select set_config('test.uid','${reader}',false)`);
+    for (const table of ['asset_photos', 'asset_documents', 'asset_observations', 'survey_benchmarks', 'asset_verification_history', 'utility_route_vertices']) {
+      const result = await db.query<{ asset_id: string }>(`select distinct asset_id from public.${table} where asset_id = any($1::uuid[])`, [[visibleAsset, otherAsset, draftAsset]]);
+      expect(result.rows.map(r => r.asset_id)).toEqual([visibleAsset]);
+    }
+    const media = await db.query<{ name: string }>('select name from storage.objects where name like $1 order by name', [`${inst}/%`]);
+    expect(media.rows).toHaveLength(2);
+    expect(media.rows.every(r => r.name.includes(visibleAsset))).toBe(true);
+    await expect(db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2)", [crypto.randomUUID(), `${inst}/${campus}/${visibleAsset}/photos/new.jpg`])).rejects.toThrow();
+    await db.exec(`select set_config('test.uid','${tech}',false)`);
+    await expect(db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2)", [crypto.randomUUID(), `${inst}/${campus2}/${otherAsset}/photos/new.jpg`])).rejects.toThrow();
+    await expect(db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2)", [crypto.randomUUID(), `${inst}/${campus}/${draftAsset}/photos/new.jpg`])).rejects.toThrow();
+    await expect(db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2)", [crypto.randomUUID(), `${inst}/${campus}/${otherAsset}/photos/new.jpg`])).rejects.toThrow();
+    await expect(db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos','bad/../../bad')", [crypto.randomUUID()])).rejects.toThrow();
+    await expect(db.query("insert into public.asset_documents(id,institution_id,asset_id,storage_path,file_name,mime_type,file_size_bytes,title) values ($1,$2,$3,$4,'bad.pdf','application/pdf',3,'Test')", [crypto.randomUUID(), inst, visibleAsset, `${inst}/${campus2}/${otherAsset}/docs/bad.pdf`])).rejects.toThrow();
+    await db.query("insert into storage.objects(id,bucket_id,name) values ($1,'asset-photos',$2)", [crypto.randomUUID(), `${inst}/${campus}/${visibleAsset}/photos/allowed.jpg`]);
+    await db.exec(`select set_config('test.uid','${admin}',false)`);
+  });
   it('replays a point atomically and idempotently, including rollback on invalid benchmark', async () => {
     const pointId = '10000000-0000-4000-8000-000000000091';
     const mutation = '10000000-0000-4000-8000-000000000092';

@@ -13,7 +13,7 @@ export function ProtectedRoute({
   children: ReactNode;
   requiredPermission?: Permission;
 }) {
-  const { session, isLoading, activeMembership, activeRole, can, signOut } =
+  const { session, isLoading, activeMembership, activeRole, can, signOut, refreshSession } =
     useAuth();
   const location = useLocation();
 
@@ -53,7 +53,8 @@ export function ProtectedRoute({
             Contact your university BADO Administrator to link your account to an
             institution, campus, and role.
           </p>
-          <div className="mt-4">
+          <div className="mt-4 flex gap-3">
+            <Button onClick={() => void refreshSession()}>Check assignment</Button>
             <Button variant="outline" onClick={() => void signOut()}>
               Sign out
             </Button>

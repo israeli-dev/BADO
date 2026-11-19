@@ -183,6 +183,7 @@ export interface BadoDataGateway {
   ): Promise<DashboardSummary>;
 
   // Institutional administration mutations (admin-only, audited)
+  assignConfirmedMember(institutionId: string, campusId: string, email: string): Promise<void>;
   createCampus(institutionId: string, input: CreateCampusInput): Promise<Campus>;
   createDepartment(
     institutionId: string,

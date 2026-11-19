@@ -115,6 +115,16 @@ async function requireOfflineCaptureUser(): Promise<string> {
   return data.session.user.id;
 }
 
+async function resolveMediaCampus(institutionId: string, assetId: string, cached: AssetRecord | undefined, offline: boolean): Promise<string> {
+  if (cached && cached.institutionId === institutionId && !cached.archivedAt) return cached.campusId;
+  if (offline) throw new Error('The asset must be present in the offline cache to attach media.');
+  const { data, error } = await getSupabaseClient().from('assets').select('campus_id')
+    .eq('institution_id', institutionId).eq('id', assetId).is('archived_at', null).maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error('The asset was not found or is not accessible.');
+  return data.campus_id;
+}
+
 function parseGeometry(raw: unknown): Geometry {
   if (raw && typeof raw === 'object' && 'type' in raw && 'coordinates' in raw) {
     return raw as Geometry;
@@ -894,6 +904,14 @@ export class SupabaseDataGateway implements BadoDataGateway {
     return mapped;
   }
 
+  async assignConfirmedMember(institutionId: string, campusId: string, email: string): Promise<void> {
+    const validatedEmail = z.string().trim().toLowerCase().pipe(z.email()).parse(email);
+    const { error } = await getSupabaseClient().rpc('assign_confirmed_member', {
+      p_institution_id: institutionId, p_campus_id: campusId, p_email: validatedEmail,
+    });
+    if (error) throw new Error(error.message);
+  }
+
   async updateMemberRole(
     institutionId: string,
     membershipId: string,
@@ -1669,7 +1687,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
     const photoId = crypto.randomUUID();
     const now = new Date().toISOString();
     const cachedAsset = await badoDb.assets.get(meta.assetId);
-    const campusFolder = cachedAsset?.campusId ?? 'campus';
+    const campusFolder = await resolveMediaCampus(institutionId, meta.assetId, cachedAsset, Boolean(input.saveOffline || !navigator.onLine));
     const storagePath = `${institutionId}/${campusFolder}/${meta.assetId}/photos/${photoId}_${prepared.fileName}`;
 
     if (input.saveOffline || !navigator.onLine || cachedAsset?.localSyncStatus === 'pending') {
@@ -1755,7 +1773,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
     const validated = validateDocumentFile(input.file);
     const docId = crypto.randomUUID();
     const cachedAsset = await badoDb.assets.get(meta.assetId);
-    const campusFolder = cachedAsset?.campusId ?? 'campus';
+    const campusFolder = await resolveMediaCampus(institutionId, meta.assetId, cachedAsset, Boolean(input.saveOffline || !navigator.onLine));
     const storagePath = `${institutionId}/${campusFolder}/${meta.assetId}/docs/${docId}_${validated.fileName}`;
 
     if (input.saveOffline || !navigator.onLine || cachedAsset?.localSyncStatus === 'pending') {

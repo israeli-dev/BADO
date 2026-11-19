@@ -49,7 +49,9 @@ npm run dev
 
 The sign-in page links to **Create an account** in Supabase mode. Enable email/password sign-up in the Supabase Auth provider settings if your organisation wants self-registration; the repository's local Supabase config keeps sign-up disabled by default. Enable email confirmation and configure the Site URL and allowed redirect URLs, including your deployed app's `/login` URL (and your local development `/login` URL when needed). Configure production email delivery and appropriate rate limits before inviting users. Changes to `supabase/config.toml` do not automatically change hosted project Auth settings.
 
-Creating an account **does not** grant access to an institution or a role. A trusted administrator must verify the user and provision an active `user_institutions` membership. The current administration UI can manage existing memberships but does not yet invite or assign new users; initial provisioning requires a trusted administrative workflow. Never allow users to assign their own institution or role. In demo mode, use the labelled simulated accounts; no real account is created.
+Creating an account **does not** grant access to an institution or a role. A trusted administrator must independently verify the user and assign the confirmed account in Administration → Users & Roles. The assignment starts as read-only with one selected campus. Bootstrap the first administrator through a trusted administrative workflow; the app does not self-provision an institution or its first admin. Campus scoping is not a complete confidentiality boundary: some institutional metadata policies remain institution-wide, so only assign users trusted to access institutional data until those policies are hardened. Never allow users to assign their own institution or role. In demo mode, use the labelled simulated accounts; no real account is created.
+
+Member assignment requires migration `20261118000700_assign_confirmed_member.sql` and a confirmed email address. It does not send invitations or create accounts, and existing memberships are not overwritten. A signed-in user can use **Check assignment** after an admin grants access. The new security-definer function and actual Auth schema must be verified in a real staging Supabase project before production use.
 
 ### Applying Database Migrations to Supabase
 Apply the ordered SQL migrations in `supabase/migrations/` (`20261118000100_phase1_institutional_foundation.sql` followed by `20261118000200_phase2_core_asset_registry.sql`) via the Supabase CLI (`supabase db push`) or the Supabase SQL Editor. Optional fictional training records are provided in `supabase/seed.sql`.
@@ -73,3 +75,5 @@ npm run build       # Production bundle build
 - [`docs/DATABASE_DESIGN.md`](docs/DATABASE_DESIGN.md)
 - [`docs/SECURITY_AND_PERMISSIONS.md`](docs/SECURITY_AND_PERMISSIONS.md)
 - [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md)
+
+Migration `20261118000800_asset_child_media_scope.sql` narrows asset-related child records and Storage access to the parent asset and campus. Review existing media paths before rollout: only paths in the format `institution/campus/asset/photos|docs/filename` are accessible under these policies; legacy paths may require an administrator-led migration. Other institution-wide data and any additional project-specific permissive policies still require review.
