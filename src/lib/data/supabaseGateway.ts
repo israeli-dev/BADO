@@ -27,11 +27,13 @@ import {
   createCampusSchema,
   createDepartmentSchema,
   signInSchema,
+  signUpSchema,
   type BadoDataGateway,
   type BenchmarkReferenceOption,
   type CreateCampusInput,
   type CreateDepartmentInput,
   type SignInInput,
+  type SignUpInput,
   type UpdateSettingsInput,
   type UploadAssetDocumentInput,
   type UploadAssetPhotoInput,
@@ -574,6 +576,22 @@ export class SupabaseDataGateway implements BadoDataGateway {
       throw new Error('Signed in, but failed to load institutional user profile.');
     }
     return session;
+  }
+
+  async signUp(rawInput: SignUpInput): Promise<AuthSessionState | null> {
+    const input = signUpSchema.parse(rawInput);
+    const { data, error } = await getSupabaseClient().auth.signUp({
+      email: input.email,
+      password: input.password,
+      options: {
+        data: { full_name: input.fullName },
+        emailRedirectTo: `${window.location.origin}/login`,
+      },
+    });
+    if (error) throw new Error(error.message);
+    // With email confirmation enabled, no session is returned. Do not infer whether
+    // the address was new: Supabase may deliberately obscure existing accounts.
+    return data.session ? this.getSession() : null;
   }
 
   async signInAsDemoUser(_userId: string): Promise<AuthSessionState> {

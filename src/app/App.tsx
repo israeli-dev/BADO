@@ -5,6 +5,7 @@ import { AppLayout } from '@/app/AppLayout';
 import { AuthProvider } from '@/features/auth/AuthContext';
 import { ProtectedRoute } from '@/features/auth/ProtectedRoute';
 import { SignInPage } from '@/features/auth/SignInPage';
+import { SignUpPage } from '@/features/auth/SignUpPage';
 import { DashboardPage } from '@/features/dashboard/DashboardPage';
 import { PlannedModulePage } from '@/features/shared/PlannedModulePage';
 import type { FoundationDataGateway } from '@/lib/data';
@@ -48,6 +49,7 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<SignInPage />} />
+      <Route path="/signup" element={<SignUpPage />} />
 
       <Route
         element={

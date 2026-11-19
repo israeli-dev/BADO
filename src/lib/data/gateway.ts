@@ -42,6 +42,17 @@ export const signInSchema = z.object({
 
 export type SignInInput = z.infer<typeof signInSchema>;
 
+export const signUpSchema = z.object({
+  fullName: z.string().trim().min(2, 'Enter your full name.').max(140),
+  email: z.string().trim().toLowerCase().pipe(z.email('Enter a valid institutional email address.')),
+  password: z.string().min(10, 'Password must be at least 10 characters.').max(72, 'Password must be at most 72 characters.'),
+  confirmPassword: z.string(),
+}).refine((value) => value.password === value.confirmPassword, {
+  path: ['confirmPassword'], message: 'Passwords do not match.',
+});
+export type SignUpInput = z.infer<typeof signUpSchema>;
+
+
 export const createCampusSchema = z.object({
   name: z
     .string()
@@ -155,6 +166,7 @@ export interface BadoDataGateway {
   // Authentication & session
   getSession(): Promise<AuthSessionState | null>;
   signInWithPassword(input: SignInInput): Promise<AuthSessionState>;
+  signUp(input: SignUpInput): Promise<AuthSessionState | null>;
   signInAsDemoUser(userId: string): Promise<AuthSessionState>;
   signOut(): Promise<void>;
   onAuthStateChange(listener: () => void): () => void;
