@@ -28,6 +28,7 @@ import {
   createCampusSchema,
   createDepartmentSchema,
   signInSchema,
+  emailSchema,
   signUpSchema,
   type BadoDataGateway,
   type BenchmarkReferenceOption,
@@ -528,9 +529,10 @@ export class SupabaseDataGateway implements BadoDataGateway {
       .from('profiles')
       .select('*')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
 
-    if (profileError) throw new Error(profileError.message);
+    if (profileError) throw new Error(`Unable to load your BADO profile. Check the database setup and connection: ${profileError.message}`);
+    if (!profileRow) throw new Error('Your account is signed in, but its BADO profile is missing. Ask an administrator to check migrations and the profile trigger/backfill.');
 
     const { data: membershipRows, error: memError } = await supabase
       .from('user_institutions')
@@ -602,7 +604,19 @@ export class SupabaseDataGateway implements BadoDataGateway {
     if (error) throw new Error(error.message);
     // With email confirmation enabled, no session is returned. Do not infer whether
     // the address was new: Supabase may deliberately obscure existing accounts.
-    return data.session ? this.getSession() : null;
+    if (!data.session) return null;
+    const session = await this.getSession();
+    if (!session) throw new Error('Account created, but the session could not be loaded. Try signing in.');
+    return session;
+  }
+
+  async resendConfirmation(email: string): Promise<void> {
+    const normalizedEmail = emailSchema.parse(email);
+    const { error } = await getSupabaseClient().auth.resend({
+      type: 'signup', email: normalizedEmail,
+      options: { emailRedirectTo: `${window.location.origin}/login` },
+    });
+    if (error) throw new Error(error.message);
   }
 
   async signInAsDemoUser(_userId: string): Promise<AuthSessionState> {
@@ -619,12 +633,14 @@ export class SupabaseDataGateway implements BadoDataGateway {
 
   onAuthStateChange(listener: () => void): () => void {
     const supabase = getSupabaseClient();
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
-      listener();
+    // Supabase holds an auth lock while invoking this callback. Defer any
+    // session/database calls until after it returns to avoid lock deadlocks.
+    const pending = new Set<ReturnType<typeof setTimeout>>();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
+      const timer = setTimeout(() => { pending.delete(timer); listener(); }, 0);
+      pending.add(timer);
     });
-    return () => subscription.unsubscribe();
+    return () => { subscription.unsubscribe(); pending.forEach(clearTimeout); pending.clear(); };
   }
 
   async listCampuses(institutionId: string): Promise<Campus[]> {

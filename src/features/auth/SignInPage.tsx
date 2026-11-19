@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { useAuth } from '@/features/auth/AuthContext';
-import { signInSchema, type SignInInput } from '@/lib/data';
+import { emailSchema, signInSchema, type SignInInput } from '@/lib/data';
 import { DEMO_PERSONAS } from '@/lib/data/demoSeed';
 import { ROLE_METADATA } from '@/lib/permissions/rbac';
 
@@ -24,12 +24,17 @@ export function SignInPage() {
     gateway,
     session,
     isLoading,
+    sessionError,
+    refreshSession,
+    signOut,
     signInWithPassword,
     signInAsDemoUser,
   } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [authError, setAuthError] = useState<string | null>(null);
+  const [resendMessage, setResendMessage] = useState<string | null>(null);
+  const [resending, setResending] = useState(false);
   const [pendingDemoUserId, setPendingDemoUserId] = useState<string | null>(null);
 
   const destination =
@@ -38,6 +43,7 @@ export function SignInPage() {
   const {
     register,
     handleSubmit,
+    getValues,
     formState: { errors, isSubmitting },
   } = useForm<SignInInput>({
     resolver: zodResolver(signInSchema),
@@ -58,6 +64,19 @@ export function SignInPage() {
         error instanceof Error ? error.message : 'Unable to sign in.',
       );
     }
+  };
+
+  const resendConfirmation = async () => {
+    setAuthError(null); setResendMessage(null);
+    const email = emailSchema.safeParse(getValues('email'));
+    if (!email.success) { setAuthError('Enter a valid email address above first.'); return; }
+    setResending(true);
+    try {
+      await gateway.resendConfirmation(email.data);
+      setResendMessage('If this address is eligible, a confirmation email will be sent. Check your inbox and spam folder.');
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Could not request a confirmation email.');
+    } finally { setResending(false); }
   };
 
   const handleDemoSignIn = async (userId: string) => {
@@ -115,6 +134,11 @@ export function SignInPage() {
           </Alert>
         )}
 
+        {sessionError && <Alert tone="danger" title="Could not load your account" className="mb-5">
+          <p>{sessionError}</p>
+          <div className="mt-2 flex gap-2"><Button size="sm" onClick={() => void refreshSession()}>Try again</Button><Button size="sm" variant="outline" onClick={() => void signOut().catch(e => setAuthError(e instanceof Error ? e.message : 'Unable to sign out.'))}>Sign out</Button></div>
+        </Alert>}
+        {resendMessage && <Alert tone="info" title="Confirmation request" className="mb-5">{resendMessage}</Alert>}
         <div className="grid gap-6 lg:grid-cols-12">
           {/* Institutional Sign-In Card */}
           <div className={isDemoMode ? 'lg:col-span-5' : 'lg:col-span-6 lg:col-start-4'}>
@@ -156,6 +180,7 @@ export function SignInPage() {
                 </Button>
               </form>
 
+              {!isDemoMode && <button type="button" disabled={resending} onClick={() => void resendConfirmation()} className="mt-3 text-sm font-semibold text-bado-navy-800 underline disabled:opacity-50">{resending ? 'Requesting…' : 'Resend confirmation email'}</button>}
               <p className="mt-4 text-center text-sm text-slate-600">
                 Need an account?{' '}
                 <Link to="/signup" state={location.state} className="font-semibold text-bado-navy-800 underline underline-offset-2">Create an account</Link>
@@ -167,8 +192,7 @@ export function SignInPage() {
                     aria-hidden="true"
                   />
                   <p>
-                    Your university administrator assigns institutional access after account creation. Data is isolated per institution
-                    through PostgreSQL Row Level Security.
+                    Your university administrator assigns institutional access after account creation. Access is governed by your institution’s database policies.
                   </p>
                 </div>
                 {isDemoMode && (

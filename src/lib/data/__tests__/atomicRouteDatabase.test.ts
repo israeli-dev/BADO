@@ -10,6 +10,7 @@ import assignment from '../../../../supabase/migrations/20261118000700_assign_co
 import childScope from '../../../../supabase/migrations/20261118000800_asset_child_media_scope.sql?raw';
 import hardened from '../../../../supabase/migrations/20261118000900_harden_replay_receipts.sql?raw';
 import digCheck from '../../../../supabase/migrations/20261118001000_check_before_dig.sql?raw';
+import authProfiles from '../../../../supabase/migrations/20261118001100_auth_profile_backfill.sql?raw';
 import { PGlite } from '@electric-sql/pglite';
 import { postgis } from '@electric-sql/pglite-postgis';
 import { BadoLocalDatabase } from '@/lib/db/badoDb';
@@ -45,8 +46,9 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('test.uid', true),'')::uuid $$;
       create schema storage; create table storage.buckets(id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);
       create table storage.objects(id uuid, bucket_id text, name text);
-      create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1, '/') $$;`);
-    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope, hardened, digCheck]) {
+      create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1, '/') $$;
+      insert into auth.users(id,email,raw_user_meta_data) values ('10000000-0000-4000-8000-000000000090','prior@example.edu',jsonb_build_object('full_name','Existing user'));`);
+    for (const migration of [foundation, assets, gis, atomic, replay, point, assignment, childScope, hardened, digCheck, authProfiles]) {
       // PGlite provides gen_random_uuid natively, but not the pgcrypto extension package.
       await db.exec(migration.replace('create extension if not exists pgcrypto;', ''));
     }
@@ -65,6 +67,15 @@ describe('atomic route writes with PostgreSQL RLS', () => {
       set role authenticated; select set_config('test.uid','${admin}',false);`);
   }, 60000);
   afterAll(async () => { await db?.close(); });
+  it('backfills existing auth identities, handles long names and synchronizes email without granting roles', async () => {
+    await db.exec(`reset role;
+      insert into auth.users(id,email,raw_user_meta_data) values ('10000000-0000-4000-8000-000000000091','new@example.edu',jsonb_build_object('full_name',repeat('A', 200)));
+      update auth.users set email='changed@example.edu' where id='10000000-0000-4000-8000-000000000091';`);
+    const rows = await db.query<{email:string, full_name:string}>(`select email, full_name from public.profiles where id in ('10000000-0000-4000-8000-000000000090','10000000-0000-4000-8000-000000000091') order by email`);
+    expect(rows.rows).toEqual([{email:'changed@example.edu',full_name:'A'.repeat(140)},{email:'prior@example.edu',full_name:'Existing user'}]);
+    expect((await db.query<{count:number}>(`select count(*)::int as count from public.user_institutions where user_id in ('10000000-0000-4000-8000-000000000090','10000000-0000-4000-8000-000000000091')`)).rows[0]!.count).toBe(0);
+    await db.exec(`set role authenticated; select set_config('test.uid','${admin}',false);`);
+  });
   it('checks actual route geometry under caller RLS and validates inputs', async () => {
     const routeId = '10000000-0000-4000-8000-000000000099';
     await db.exec(`reset role;

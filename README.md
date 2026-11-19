@@ -54,7 +54,7 @@ Creating an account **does not** grant access to an institution or a role. A tru
 Member assignment requires migration `20261118000700_assign_confirmed_member.sql` and a confirmed email address. It does not send invitations or create accounts, and existing memberships are not overwritten. A signed-in user can use **Check assignment** after an admin grants access. The new security-definer function and actual Auth schema must be verified in a real staging Supabase project before production use.
 
 ### Applying Database Migrations to Supabase
-Apply the ordered SQL migrations in `supabase/migrations/` (`20261118000100_phase1_institutional_foundation.sql` followed by `20261118000200_phase2_core_asset_registry.sql`) via the Supabase CLI (`supabase db push`) or the Supabase SQL Editor. Optional fictional training records are provided in `supabase/seed.sql`.
+Apply all ordered SQL migrations in `supabase/migrations/` through `20261118001100` using a reviewed Supabase CLI workflow. Inspect existing migration history before applying changes; SQL Editor execution does not automatically record CLI migration history. Optional fictional training records are provided in `supabase/seed.sql`. For Auth, SMTP, existing users, and first-admin bootstrap, follow [Supabase Auth setup and troubleshooting](docs/SUPABASE_AUTH_SETUP.md).
 
 > **Security:** Never place `SUPABASE_SERVICE_ROLE_KEY` or direct database passwords in `.env` or any `VITE_*` variable. BADO includes a runtime startup guard that rejects `service_role` and `sb_secret_*` keys in frontend configuration.
 
@@ -62,7 +62,7 @@ Apply the ordered SQL migrations in `supabase/migrations/` (`20261118000100_phas
 ```bash
 npm run typecheck   # TypeScript project-reference check
 npm run lint        # ESLint static analysis
-npm test            # Vitest automated unit & UI integration suite (38 tests)
+npm test            # Vitest automated unit & UI integration suite
 npm run build       # Production bundle build
 ```
 

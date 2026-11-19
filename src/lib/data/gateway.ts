@@ -36,16 +36,17 @@ import {
   type UtilityDepthObservationRecord,
 } from '@/types/domain';
 
+export const emailSchema = z.string().trim().toLowerCase().pipe(z.email('Enter a valid institutional email address.'));
 export const signInSchema = z.object({
-  email: z.email('Enter a valid institutional email address.').trim().toLowerCase(),
-  password: z.string().min(8, 'Password must be at least 8 characters.'),
+  email: emailSchema,
+  password: z.string().min(1, 'Enter your password.'),
 });
 
 export type SignInInput = z.infer<typeof signInSchema>;
 
 export const signUpSchema = z.object({
   fullName: z.string().trim().min(2, 'Enter your full name.').max(140),
-  email: z.string().trim().toLowerCase().pipe(z.email('Enter a valid institutional email address.')),
+  email: emailSchema,
   password: z.string().min(10, 'Password must be at least 10 characters.').max(72, 'Password must be at most 72 characters.'),
   confirmPassword: z.string(),
 }).refine((value) => value.password === value.confirmPassword, {
@@ -168,6 +169,7 @@ export interface BadoDataGateway {
   getSession(): Promise<AuthSessionState | null>;
   signInWithPassword(input: SignInInput): Promise<AuthSessionState>;
   signUp(input: SignUpInput): Promise<AuthSessionState | null>;
+  resendConfirmation(email: string): Promise<void>;
   signInAsDemoUser(userId: string): Promise<AuthSessionState>;
   signOut(): Promise<void>;
   onAuthStateChange(listener: () => void): () => void;

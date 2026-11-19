@@ -13,7 +13,7 @@ export function ProtectedRoute({
   children: ReactNode;
   requiredPermission?: Permission;
 }) {
-  const { session, isLoading, activeMembership, activeRole, can, signOut, refreshSession } =
+  const { session, isLoading, sessionError, activeMembership, activeRole, can, signOut, refreshSession } =
     useAuth();
   const location = useLocation();
 
@@ -29,6 +29,10 @@ export function ProtectedRoute({
         </div>
       </div>
     );
+  }
+
+  if (sessionError) {
+    return <div className="flex min-h-dvh items-center justify-center bg-slate-50 p-4"><Card className="max-w-md" title="Could not load your account"><p className="text-sm">{sessionError}</p><div className="mt-4 flex gap-3"><Button onClick={() => void refreshSession()}>Try again</Button><Link to="/login"><Button variant="outline">Sign-in options</Button></Link></div></Card></div>;
   }
 
   if (!session) {
