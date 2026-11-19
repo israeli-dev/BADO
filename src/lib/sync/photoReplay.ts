@@ -13,7 +13,7 @@ export interface PhotoReplayTransport {
   find(institutionId: string, id: string): Promise<PhotoRow | null>;
 }
 
-async function sameBytes(a: Blob, b: Blob): Promise<boolean> {
+export async function sameBytes(a: Blob, b: Blob): Promise<boolean> {
   if (a.size !== b.size) return false;
   const first = new Uint8Array(await a.arrayBuffer());
   const second = new Uint8Array(await b.arrayBuffer());

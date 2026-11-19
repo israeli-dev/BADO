@@ -529,6 +529,7 @@ export function AssetRegistrationPage() {
           file: doc.file,
           documentKind: doc.documentKind,
           title: doc.title,
+          saveOffline: !isOnline,
         });
       }
 

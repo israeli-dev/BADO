@@ -76,7 +76,7 @@ export function SyncQueuePage() {
       )}
 
       <Alert tone="warning" title="Route sync is limited">
-        Supported point assets, routes, depth observations and photos captured by the same signed-in user are sent when online. Failed items must be requeued; conflicts require review and cannot yet be resolved here. Documents, other operations and older records without capture-user information are not automatically uploaded. Keep this device and its browser data; Supabase integration testing is still required.
+        Supported point assets, routes, depth observations, photos and documents captured by the same signed-in user are sent when online. Failed items must be requeued; conflicts require review and cannot yet be resolved here. Other operations and older records without capture-user information are not automatically uploaded. Keep this device and its browser data; Supabase integration testing is still required.
       </Alert>
       {errorMessage && <Alert tone="danger">{errorMessage}</Alert>}
 

@@ -108,7 +108,7 @@ type JunctionRow = Database['public']['Tables']['utility_junctions']['Row'];
 async function requireOfflineCaptureUser(): Promise<string> {
   const { data, error } = await getSupabaseClient().auth.getSession();
   if (error || !data.session?.user.id) {
-    throw new Error('A signed-in user session is required to queue route changes.');
+    throw new Error('A signed-in user session is required to queue offline changes.');
   }
   return data.session.user.id;
 }
@@ -1654,7 +1654,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
     const campusFolder = cachedAsset?.campusId ?? 'campus';
     const storagePath = `${institutionId}/${campusFolder}/${meta.assetId}/photos/${photoId}_${prepared.fileName}`;
 
-    if (input.saveOffline || !navigator.onLine) {
+    if (input.saveOffline || !navigator.onLine || cachedAsset?.localSyncStatus === 'pending') {
       const actorUserId = await requireOfflineCaptureUser();
       if (!cachedAsset || cachedAsset.institutionId !== institutionId) throw new Error('The asset must be present in the offline cache to attach a photo.');
       const blobId = crypto.randomUUID();
@@ -1739,6 +1739,34 @@ export class SupabaseDataGateway implements BadoDataGateway {
     const cachedAsset = await badoDb.assets.get(meta.assetId);
     const campusFolder = cachedAsset?.campusId ?? 'campus';
     const storagePath = `${institutionId}/${campusFolder}/${meta.assetId}/docs/${docId}_${validated.fileName}`;
+
+    if (input.saveOffline || !navigator.onLine || cachedAsset?.localSyncStatus === 'pending') {
+      const actorUserId = await requireOfflineCaptureUser();
+      if (!cachedAsset || cachedAsset.institutionId !== institutionId || cachedAsset.archivedAt) {
+        throw new Error('The asset must be present in the offline cache to attach a document.');
+      }
+      const now = new Date().toISOString();
+      const blobId = crypto.randomUUID();
+      const localDocument: AssetDocumentRecord = {
+        id: docId, institutionId, assetId: meta.assetId, storagePath,
+        fileName: validated.fileName, mimeType: validated.mimeType, fileSizeBytes: validated.fileSizeBytes,
+        documentKind: meta.documentKind, title: meta.title, description: meta.description || null,
+        uploadedBy: null, createdAt: now, localBlobId: blobId,
+      };
+      await badoDb.transaction('rw', [badoDb.localMediaBlobs, badoDb.assetDocuments, badoDb.syncQueue], async () => {
+        await badoDb.localMediaBlobs.add({
+          id: blobId, institutionId, assetId: meta.assetId, mediaKind: 'document',
+          fileName: validated.fileName, mimeType: validated.mimeType, blob: validated.blob, createdAt: now,
+        });
+        await badoDb.assetDocuments.put(localDocument);
+        await enqueueSyncOperation({
+          institutionId, campusId: cachedAsset.campusId, actorUserId,
+          recordType: 'asset_documents', recordId: docId, operationType: 'upload_document',
+          payload: { localBlobId: blobId, meta: localDocument }, capturedAt: now,
+        });
+      });
+      return localDocument;
+    }
 
     const supabase = getSupabaseClient();
     const { error: uploadErr } = await supabase.storage
