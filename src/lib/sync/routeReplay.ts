@@ -1,17 +1,23 @@
 import { badoDb, type BadoLocalDatabase } from '@/lib/db/badoDb';
+import { replayPhoto, supabasePhotoTransport } from '@/lib/sync/photoReplay';
 import { getSupabaseClient } from '@/lib/supabase/client';
 import type { Json } from '@/types/database';
 import type { SyncQueueRecord } from '@/types/domain';
 
 const LEASE_MS = 5 * 60_000;
-type Replay = (item: SyncQueueRecord, assetId: string, operation: 'create' | 'update' | 'depth') => Promise<void>;
+type Replay = (item: SyncQueueRecord, assetId: string, operation: 'create' | 'update' | 'depth' | 'photo' | 'point') => Promise<void>;
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
-function routeOperation(item: SyncQueueRecord): { assetId: string; operation: 'create' | 'update' | 'depth' } | null {
+function routeOperation(item: SyncQueueRecord): { assetId: string; operation: 'create' | 'update' | 'depth' | 'photo' | 'point' } | null {
   if (item.recordType === 'linear_routes' && (item.operationType === 'create' || item.operationType === 'update')) {
     return { assetId: item.recordId, operation: item.operationType };
+  }
+  if (item.recordType === 'assets' && item.operationType === 'create' && asObject(item.payload.assetInsert)) return { assetId: item.recordId, operation: 'point' };
+  if (item.recordType === 'asset_photos' && item.operationType === 'upload_photo') {
+    const assetId = asObject(item.payload.meta)?.assetId;
+    if (typeof assetId === 'string') return { assetId, operation: 'photo' };
   }
   if (item.recordType === 'utility_depth_observations' && item.operationType === 'create') {
     const assetId = asObject(item.payload.depthObservationInsert)?.asset_id;
@@ -71,7 +77,7 @@ export async function processRouteQueue(institutionId: string, actorId: string, 
         if (!current || current.claimId !== item.claimId || current.status !== 'syncing') return;
         await db.syncQueue.put({ ...current, status: 'synced', claimId: null, errorDetails: null });
         const remaining = await db.syncQueue.where('institutionId').equals(institutionId)
-          .filter(row => row.id !== item.id && row.status !== 'synced' && routeOperation(row)?.assetId === route.assetId && routeOperation(row)?.operation !== 'depth').toArray();
+          .filter(row => row.id !== item.id && row.status !== 'synced' && routeOperation(row)?.assetId === route.assetId && routeOperation(row)?.operation !== 'depth' && routeOperation(row)?.operation !== 'photo').toArray();
         if (remaining.length === 0) {
           const asset = await db.assets.get(route.assetId);
           if (asset?.institutionId === institutionId && asset.localSyncStatus === 'pending') await db.assets.put({ ...asset, localSyncStatus: 'synced' });
@@ -90,10 +96,20 @@ export async function processRouteQueue(institutionId: string, actorId: string, 
   }
 }
 
-export async function replayRouteToSupabase(item: SyncQueueRecord, assetId: string, operation: 'create' | 'update' | 'depth'): Promise<void> {
+export async function replayRouteToSupabase(item: SyncQueueRecord, assetId: string, operation: 'create' | 'update' | 'depth' | 'photo' | 'point'): Promise<void> {
   const supabase = getSupabaseClient();
   const { data: session } = await supabase.auth.getSession();
   if (!session.session?.user.id || item.actorUserId !== session.session.user.id) throw new Error('The original capture user must be signed in to synchronise.');
+  if (operation === 'photo') { await replayPhoto(item, supabasePhotoTransport()); return; }
+  if (operation === 'point') {
+    const { data, error } = await supabase.rpc('replay_point_asset_mutation', {
+      p_mutation_id: item.id, p_institution_id: item.institutionId, p_actor_id: item.actorUserId,
+      p_asset_id: assetId, p_payload: item.payload as Json,
+    });
+    if (error) throw error;
+    if (!data || typeof data !== 'object' || Array.isArray(data) || data.applied !== true) throw new Error('Server did not confirm the mutation.');
+    return;
+  }
   const { data, error } = await supabase.rpc('replay_linear_route_mutation', {
     p_mutation_id: item.id, p_institution_id: item.institutionId, p_actor_id: item.actorUserId,
     p_asset_id: assetId, p_operation: operation, p_payload: item.payload as Json, p_base_version: item.baseVersion,

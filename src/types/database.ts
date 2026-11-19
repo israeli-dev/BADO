@@ -763,6 +763,8 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
+      create_point_asset_atomic: { Args: { p_institution_id: string; p_asset: Json; p_benchmark: Json }; Returns: Json };
+      replay_point_asset_mutation: { Args: { p_mutation_id: string; p_institution_id: string; p_actor_id: string; p_asset_id: string; p_payload: Json }; Returns: Json };
       replay_linear_route_mutation: {
         Args: { p_mutation_id: string; p_institution_id: string; p_actor_id: string; p_asset_id: string; p_operation: string; p_payload: Json; p_base_version?: number | null };
         Returns: Json;

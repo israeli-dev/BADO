@@ -1484,7 +1484,18 @@ export class SupabaseDataGateway implements BadoDataGateway {
     };
 
     // Offline-first capture: save locally and queue idempotently when offline
+    const benchmarkInsert = input.category === 'survey_reference' && input.benchmark ? {
+      asset_id: id, institution_id: institutionId, reference_code: input.benchmark.referenceCode,
+      monument_type: input.benchmark.monumentType, elevation_m: input.benchmark.elevationM ?? null,
+      vertical_datum: input.benchmark.verticalDatum, horizontal_crs: input.benchmark.horizontalCrs,
+      survey_method: input.benchmark.surveyMethod,
+      horizontal_accuracy_m: input.benchmark.horizontalAccuracyM ?? input.horizontalAccuracyM ?? null,
+      vertical_accuracy_m: input.benchmark.verticalAccuracyM ?? input.verticalAccuracyM ?? null,
+      survey_date: input.benchmark.surveyDate || null, surveyor_name: input.benchmark.surveyorName || null,
+    } : null;
+
     if (input.saveOffline || !navigator.onLine) {
+      const actorUserId = await requireOfflineCaptureUser();
       const localRecord: AssetRecord = {
         id,
         institutionId,
@@ -1543,59 +1554,27 @@ export class SupabaseDataGateway implements BadoDataGateway {
         localSyncStatus: 'pending',
       };
 
-      await badoDb.assets.put(localRecord);
-      await enqueueSyncOperation({
-        institutionId,
-        campusId: input.campusId,
-        recordType: 'assets',
-        recordId: id,
-        operationType: 'create',
-        payload: {
-          assetInsert: insertPayload,
-          benchmarkInsert: input.benchmark ?? null,
-        },
-        capturedAt,
+      await badoDb.transaction('rw', [badoDb.assets, badoDb.syncQueue], async () => {
+        await badoDb.assets.put(localRecord);
+        await enqueueSyncOperation({
+          institutionId, campusId: input.campusId, actorUserId, recordType: 'assets',
+          recordId: id, operationType: 'create',
+          payload: { assetInsert: insertPayload, benchmarkInsert }, capturedAt,
+        });
       });
 
       return localRecord;
     }
 
     const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('assets')
-      .insert(insertPayload)
-      .select('*')
-      .single();
-
+    const { data, error } = await supabase.rpc('create_point_asset_atomic', {
+      p_institution_id: institutionId, p_asset: insertPayload as unknown as Json,
+      p_benchmark: benchmarkInsert as unknown as Json,
+    });
     if (error) throw new Error(error.message);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Server did not return the asset.');
 
-    if (input.category === 'survey_reference' && input.benchmark) {
-      const { error: bmErr } = await supabase.from('survey_benchmarks').insert({
-        asset_id: data.id,
-        institution_id: institutionId,
-        reference_code: input.benchmark.referenceCode,
-        monument_type: input.benchmark.monumentType,
-        elevation_m: input.benchmark.elevationM ?? null,
-        vertical_datum: input.benchmark.verticalDatum,
-        horizontal_crs: input.benchmark.horizontalCrs,
-        survey_method: input.benchmark.surveyMethod,
-        horizontal_accuracy_m:
-          input.benchmark.horizontalAccuracyM ??
-          input.horizontalAccuracyM ??
-          null,
-        vertical_accuracy_m:
-          input.benchmark.verticalAccuracyM ?? input.verticalAccuracyM ?? null,
-        survey_date: input.benchmark.surveyDate
-          ? input.benchmark.surveyDate
-          : null,
-        surveyor_name: input.benchmark.surveyorName
-          ? input.benchmark.surveyorName
-          : null,
-      });
-      if (bmErr) throw new Error(bmErr.message);
-    }
-
-    const mapped = mapAsset(data);
+    const mapped = mapAsset(data as unknown as AssetRow);
     await badoDb.assets.put(mapped);
     return mapped;
   }
@@ -1676,18 +1655,9 @@ export class SupabaseDataGateway implements BadoDataGateway {
     const storagePath = `${institutionId}/${campusFolder}/${meta.assetId}/photos/${photoId}_${prepared.fileName}`;
 
     if (input.saveOffline || !navigator.onLine) {
+      const actorUserId = await requireOfflineCaptureUser();
+      if (!cachedAsset || cachedAsset.institutionId !== institutionId) throw new Error('The asset must be present in the offline cache to attach a photo.');
       const blobId = crypto.randomUUID();
-      await badoDb.localMediaBlobs.add({
-        id: blobId,
-        institutionId,
-        assetId: meta.assetId,
-        mediaKind: 'photo',
-        fileName: prepared.fileName,
-        mimeType: prepared.mimeType,
-        blob: prepared.blob,
-        createdAt: now,
-      });
-
       const localPhoto: AssetPhotoRecord = {
         id: photoId,
         institutionId,
@@ -1706,15 +1676,17 @@ export class SupabaseDataGateway implements BadoDataGateway {
         createdAt: now,
         localBlobId: blobId,
       };
-      await badoDb.assetPhotos.put(localPhoto);
-      await enqueueSyncOperation({
-        institutionId,
-        campusId: cachedAsset?.campusId ?? null,
-        recordType: 'asset_photos',
-        recordId: photoId,
-        operationType: 'upload_photo',
-        payload: { localBlobId: blobId, meta: localPhoto },
-        capturedAt: localPhoto.capturedAt,
+      await badoDb.transaction('rw', [badoDb.localMediaBlobs, badoDb.assetPhotos, badoDb.syncQueue], async () => {
+        await badoDb.localMediaBlobs.add({
+          id: blobId, institutionId, assetId: meta.assetId, mediaKind: 'photo',
+          fileName: prepared.fileName, mimeType: prepared.mimeType, blob: prepared.blob, createdAt: now,
+        });
+        await badoDb.assetPhotos.put(localPhoto);
+        await enqueueSyncOperation({
+          institutionId, campusId: cachedAsset.campusId, actorUserId,
+          recordType: 'asset_photos', recordId: photoId, operationType: 'upload_photo',
+          payload: { localBlobId: blobId, meta: localPhoto }, capturedAt: localPhoto.capturedAt,
+        });
       });
       return localPhoto;
     }
