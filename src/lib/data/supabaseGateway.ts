@@ -1,3 +1,4 @@
+import type { Json } from '@/types/database';
 import { cacheAndMergeServerAssets } from '@/lib/sync/assetCache';
 import type { Geometry } from 'geojson';
 import { z } from 'zod';
@@ -103,6 +104,14 @@ type RouteVertexRow =
 type DepthObsRow =
   Database['public']['Tables']['utility_depth_observations']['Row'];
 type JunctionRow = Database['public']['Tables']['utility_junctions']['Row'];
+
+async function requireOfflineCaptureUser(): Promise<string> {
+  const { data, error } = await getSupabaseClient().auth.getSession();
+  if (error || !data.session?.user.id) {
+    throw new Error('A signed-in user session is required to queue route changes.');
+  }
+  return data.session.user.id;
+}
 
 function parseGeometry(raw: unknown): Geometry {
   if (raw && typeof raw === 'object' && 'type' in raw && 'coordinates' in raw) {
@@ -2006,6 +2015,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
       }));
 
     if (input.saveOffline || !navigator.onLine) {
+      const actorUserId = await requireOfflineCaptureUser();
       const localRecord: AssetRecord = {
         id,
         institutionId,
@@ -2084,7 +2094,8 @@ export class SupabaseDataGateway implements BadoDataGateway {
           await enqueueSyncOperation({
             institutionId,
             campusId: input.campusId,
-            recordType: 'assets',
+            actorUserId,
+            recordType: 'linear_routes',
             recordId: id,
             operationType: 'create',
             payload: { assetInsert, routeVertexInserts: vertexInserts, depthObservationInserts: depthInserts, junctionInserts },
@@ -2097,41 +2108,19 @@ export class SupabaseDataGateway implements BadoDataGateway {
     }
 
     const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('assets')
-      .insert(assetInsert)
-      .select('*')
-      .single();
-
+    const { data, error } = await supabase.rpc('create_linear_route_atomic', {
+      p_institution_id: institutionId,
+      p_asset: assetInsert as unknown as Json,
+      p_vertices: vertexInserts as unknown as Json,
+      p_depths: depthInserts as unknown as Json,
+      p_junctions: junctionInserts as unknown as Json,
+    });
     if (error) {
-      if (error.code === '23505') {
-        throw new Error(
-          `Asset code "${input.assetCode}" already exists in this institution.`,
-        );
-      }
+      if (error.code === '23505') throw new Error(`A route with this ID or related record already exists: ${input.assetCode}.`);
       throw new Error(error.message);
     }
-
-    if (vertexInserts.length > 0) {
-      const { error: vErr } = await supabase
-        .from('utility_route_vertices')
-        .insert(vertexInserts);
-      if (vErr) throw new Error(vErr.message);
-    }
-    if (depthInserts.length > 0) {
-      const { error: dErr } = await supabase
-        .from('utility_depth_observations')
-        .insert(depthInserts);
-      if (dErr) throw new Error(dErr.message);
-    }
-    if (junctionInserts.length > 0) {
-      const { error: jErr } = await supabase
-        .from('utility_junctions')
-        .insert(junctionInserts);
-      if (jErr) throw new Error(jErr.message);
-    }
-
-    const mapped = mapAsset(data);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Route save returned an invalid response.');
+    const mapped = mapAsset(data as unknown as AssetRow);
     await badoDb.assets.put(mapped);
     if (vertexRecords.length > 0) {
       await badoDb.routeVertices.bulkPut(vertexRecords);
@@ -2230,6 +2219,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
     }));
 
     if (input.saveOffline || !navigator.onLine) {
+      const actorUserId = await requireOfflineCaptureUser();
       const existing = await badoDb.assets.get(input.assetId);
       if (!existing || existing.institutionId !== institutionId) {
         throw new Error('Route not available in offline cache for editing.');
@@ -2275,7 +2265,8 @@ export class SupabaseDataGateway implements BadoDataGateway {
           await enqueueSyncOperation({
             institutionId,
             campusId: existing.campusId,
-            recordType: 'assets',
+            actorUserId,
+            recordType: 'linear_routes',
             recordId: existing.id,
             operationType: 'update',
             payload: { assetUpdate: updatePayload, routeVertexInserts: vertexInserts, junctionInserts: junctionInserts ?? null, editNotes: input.editNotes ?? null },
@@ -2288,55 +2279,31 @@ export class SupabaseDataGateway implements BadoDataGateway {
       return updatedLocal;
     }
 
+    const pendingLocalRoute = await badoDb.assets.get(input.assetId);
+    if (pendingLocalRoute?.institutionId === institutionId && pendingLocalRoute.localSyncStatus === 'pending') {
+      throw new Error('This route has pending local changes. Synchronise or resolve them before editing online.');
+    }
     const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('assets')
-      .update(updatePayload)
-      .eq('institution_id', institutionId)
-      .eq('id', input.assetId)
-      .select('*')
-      .single();
-
+    const { data, error } = await supabase.rpc('update_linear_route_atomic', {
+      p_institution_id: institutionId,
+      p_asset_id: input.assetId,
+      p_update: updatePayload as unknown as Json,
+      p_vertices: vertexInserts as unknown as Json,
+      p_junctions: (junctionInserts ?? null) as unknown as Json,
+      p_expected_version: input.baseVersion ?? null,
+    });
     if (error) throw new Error(error.message);
-
-    const { error: delErr } = await supabase
-      .from('utility_route_vertices')
-      .delete()
-      .eq('institution_id', institutionId)
-      .eq('asset_id', input.assetId);
-    if (delErr) throw new Error(delErr.message);
-
-    if (vertexInserts.length > 0) {
-      const { error: insErr } = await supabase
-        .from('utility_route_vertices')
-        .insert(vertexInserts);
-      if (insErr) throw new Error(insErr.message);
-    }
-
-    if (junctionInserts !== undefined) {
-      const { error: jDelErr } = await supabase
-        .from('utility_junctions')
-        .delete()
-        .eq('institution_id', institutionId)
-        .eq('asset_id', input.assetId);
-      if (jDelErr) throw new Error(jDelErr.message);
-      if (junctionInserts.length > 0) {
-        const { error: jInsErr } = await supabase
-          .from('utility_junctions')
-          .insert(junctionInserts);
-        if (jInsErr) throw new Error(jInsErr.message);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Route update returned an invalid response.');
+    const mapped = mapAsset(data as unknown as AssetRow);
+    await badoDb.transaction('rw', [badoDb.assets, badoDb.routeVertices, badoDb.utilityJunctions], async () => {
+      await badoDb.assets.put(mapped);
+      await badoDb.routeVertices.where('[institutionId+assetId]').equals([institutionId, input.assetId]).delete();
+      if (vertexRecords.length > 0) await badoDb.routeVertices.bulkPut(vertexRecords);
+      if (junctionRecords !== undefined) {
+        await badoDb.utilityJunctions.where('[institutionId+assetId]').equals([institutionId, input.assetId]).delete();
+        if (junctionRecords.length > 0) await badoDb.utilityJunctions.bulkPut(junctionRecords);
       }
-    }
-
-    const mapped = mapAsset(data);
-    await badoDb.assets.put(mapped);
-    await badoDb.routeVertices
-      .where('[institutionId+assetId]')
-      .equals([institutionId, input.assetId])
-      .delete();
-    if (vertexRecords.length > 0) {
-      await badoDb.routeVertices.bulkPut(vertexRecords);
-    }
+    });
     return mapped;
   }
 
@@ -2376,6 +2343,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
       };
 
     if (input.saveOffline || !navigator.onLine) {
+      const actorUserId = await requireOfflineCaptureUser();
       const localObs: UtilityDepthObservationRecord = {
         id,
         institutionId,
@@ -2396,6 +2364,7 @@ export class SupabaseDataGateway implements BadoDataGateway {
         await enqueueSyncOperation({
           institutionId,
           campusId: cachedAsset?.campusId ?? null,
+          actorUserId,
           recordType: 'utility_depth_observations',
           recordId: id,
           operationType: 'create',
@@ -2406,6 +2375,9 @@ export class SupabaseDataGateway implements BadoDataGateway {
       return localObs;
     }
 
+    if (cachedAsset?.institutionId === institutionId && cachedAsset.localSyncStatus === 'pending') {
+      throw new Error('This route has pending local changes. Synchronise or resolve them before adding a depth observation online.');
+    }
     const supabase = getSupabaseClient();
     const { data, error } = await supabase
       .from('utility_depth_observations')

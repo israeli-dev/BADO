@@ -492,6 +492,7 @@ export const updateRouteGeometryInputSchema = z.object({
   horizontalAccuracyM: z.number().min(0).max(5000).nullable().optional(),
   isManuallyAdjusted: z.boolean().default(true),
   editNotes: z.string().trim().max(500).optional(),
+  baseVersion: z.number().int().positive().optional(),
   saveOffline: z.boolean().optional(),
 });
 

@@ -10,8 +10,10 @@ import { Button } from '@/components/ui/Button';
 import { useCampuses } from '@/features/admin/useInstitutionalData';
 import { useAuth } from '@/features/auth/AuthContext';
 import { ROLE_METADATA } from '@/lib/permissions/rbac';
+import { useRouteSync } from '@/lib/sync/useRouteSync';
 
 export function AppLayout() {
+  useRouteSync();
   const {
     gateway,
     session,

@@ -215,7 +215,7 @@ create trigger trg_depth_obs_lock_institution
 drop trigger if exists trg_depth_obs_audit on public.utility_depth_observations;
 create trigger trg_depth_obs_audit
   after insert or update or delete on public.utility_depth_observations
-  for each row execute function public.record_audit_log();
+  for each row execute function public.record_institutional_audit();
 
 -- -----------------------------------------------------------------------------
 -- 5. Route Junctions, Tees & Connections (public.utility_junctions)
@@ -266,7 +266,7 @@ create trigger trg_utility_junctions_lock_institution
 drop trigger if exists trg_utility_junctions_audit on public.utility_junctions;
 create trigger trg_utility_junctions_audit
   after insert or update or delete on public.utility_junctions
-  for each row execute function public.record_audit_log();
+  for each row execute function public.record_institutional_audit();
 
 -- -----------------------------------------------------------------------------
 -- 6. RLS Helpers & Forced Row Level Security on Phase 3 Tables

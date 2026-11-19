@@ -673,6 +673,12 @@ export interface SyncQueueRecord {
   id: string;
   institutionId: string;
   campusId: string | null;
+  /** Original authenticated user; absent on legacy queue entries. */
+  actorUserId?: string | null;
+  /** Monotonic local insertion order for operations sharing a timestamp. */
+  queueOrder?: number;
+  /** Unique lease token for the current synchronisation attempt. */
+  claimId?: string | null;
   recordType: string;
   recordId: string;
   operationType: SyncOperationType;
